@@ -27,6 +27,7 @@ line-length = 119
 # -vv will also display tests with durration = 0.00s
 addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
 testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
+asyncio_mode = "auto"  # automatically detect and run async tests
 # directories to ignore when discovering tests
 norecursedirs = [
     "external",
@@ -53,4 +54,5 @@ markers = [
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
     "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
+    "e2e: marks tests requiring remote SGLang server with GPU (deselect with '-m \"not e2e\"')",
 ]
