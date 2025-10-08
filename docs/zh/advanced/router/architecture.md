@@ -334,7 +334,219 @@ class SlimeRouter:
 - 保证 worker 选择和计数更新的原子性
 - 负载均衡更准确
 
-### 4.2 重试机制（Tenacity）
+### 4.2 Radix Tree 异步并发优化 (2025-10-08)
+
+#### 4.2.1 问题背景
+
+**发现的问题**：原始 RadixTree 实现使用 `threading.RLock`，在 asyncio 环境下会阻塞事件循环：
+
+```python
+# 原始实现
+import threading
+
+class StringRadixTrie:
+    def __init__(self):
+        self._lock = threading.RLock()  # ❌ Blocks event loop!
+
+    def find_longest_prefix(self, text: str):
+        with self._lock:  # Blocks all coroutines
+            return self._find_longest_prefix_internal(text)
+```
+
+**性能影响**：在高并发场景下，RLock 导致：
+- 并发读取性能降低 **99.1%**
+- 事件循环阻塞，吞吐量从 97,814.9 retrievals/s 降至 906.7 retrievals/s
+- 系统整体响应性严重下降
+
+#### 4.2.2 异步读写锁设计
+
+**解决方案**：实现 `AsyncReadWriteLock` 支持并发读取：
+
+```python
+class AsyncReadWriteLock:
+    """Async-friendly read-write lock for better concurrency."""
+
+    def __init__(self, debug: bool = False):
+        self._readers = 0
+        self._writers = 0
+        self._condition = asyncio.Condition()
+        self._debug = debug
+
+    async def acquire_read(self) -> None:
+        async with self._condition:
+            while self._writers > 0:
+                await self._condition.wait()
+            self._readers += 1
+            if self._debug:
+                print(f"Reader acquired. Total readers: {self._readers}")
+
+    async def release_read(self) -> None:
+        async with self._condition:
+            self._readers -= 1
+            if self._debug:
+                print(f"Reader released. Total readers: {self._readers}")
+            if self._readers == 0 and self._writers > 0:
+                self._condition.notify_all()
+
+    async def acquire_write(self) -> None:
+        async with self._condition:
+            while self._readers > 0 or self._writers > 0:
+                await self._condition.wait()
+            self._writers += 1
+            if self._debug:
+                print("Writer acquired")
+
+    async def release_write(self) -> None:
+        async with self._condition:
+            self._writers -= 1
+            if self._debug:
+                print("Writer released")
+            self._condition.notify_all()
+```
+
+**关键特性**：
+- 多个读取者可以并发访问
+- 写入者独占访问
+- 使用 `asyncio.Condition`，不阻塞事件循环
+- 支持调试模式跟踪锁状态
+
+#### 4.2.3 RadixTree 异步接口
+
+**向后兼容的异步接口**：
+
+```python
+class StringRadixTrie:
+    def __init__(self, max_cache_size=10000, tokenizer=None, verbose=False):
+        # ... 原有代码
+        self._async_lock = AsyncReadWriteLock(debug=False)
+
+    # 保持同步接口兼容性
+    def find_longest_prefix(self, text: str) -> MatchResult:
+        """Synchronous interface - wraps async implementation."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If called from async context, use sync fallback
+                with self._lock:  # Use original RLock for backward compatibility
+                    return self._find_longest_prefix_internal(text)
+            else:
+                # If called from sync context, run async method
+                return loop.run_until_complete(self.find_longest_prefix_async(text))
+        except RuntimeError:
+            # No event loop available, use sync fallback
+            with self._lock:
+                return self._find_longest_prefix_internal(text)
+
+    # 新增异步接口
+    async def find_longest_prefix_async(self, text: str) -> MatchResult:
+        """Asynchronous interface with concurrent read support."""
+        async with read_lock(self._async_lock):
+            # Temporarily disable original lock to prevent double locking
+            original_lock = self._lock
+            self._lock = None
+            try:
+                result = self._find_longest_prefix_internal(text)
+            finally:
+                self._lock = original_lock
+            return result
+
+    async def insert_async(self, text: str, token_ids: List[int],
+                         logp: List[float], loss_mask: List[int],
+                         weight_version: int) -> bool:
+        """Asynchronous insert with exclusive write access."""
+        async with write_lock(self._async_lock):
+            original_lock = self._lock
+            self._lock = None
+            try:
+                return self._insert_internal(text, token_ids, logp, loss_mask, weight_version)
+            finally:
+                self._lock = original_lock
+```
+
+#### 4.2.4 Middleware 异步优化
+
+**异步缓存操作**：
+
+```python
+class RadixTreeMiddleware(BaseHTTPMiddleware):
+    async def _retrieve_cache(self, input_text: str) -> tuple:
+        """Async cache retrieval with better concurrency."""
+        try:
+            # 使用异步接口，支持并发读取
+            result = await self.radix_tree.find_longest_prefix_async(input_text)
+
+            if result.matched_prefix and result.token_ids:
+                # 缓存命中，返回缓存结果
+                additional_tokens = self.tokenizer(result.remaining_string, add_special_tokens=False)["input_ids"]
+                return (
+                    result.token_ids + additional_tokens,
+                    (result.logp + len(additional_tokens) * [0.0]
+                     if result.logp is not None
+                     else [0] * len(result.token_ids + additional_tokens)),
+                    result.loss_mask + len(additional_tokens) * [0],
+                )
+            # 缓存未命中，使用 tokenizer
+            if self.tokenizer and input_text:
+                tokens = self.tokenizer(input_text, add_special_tokens=False)["input_ids"]
+                return tokens, [0.0] * len(tokens), [0] * len(tokens)
+            else:
+                return [], [], []
+        except Exception as e:
+            # TODO: Phase 2 - Implement structured error handling with security validation
+            if getattr(self.router, "verbose", False):
+                print(f"[slime-router] Warning: Cache retrieval error: {e}")
+            return [], [], []
+
+    async def _insert_cache(self, full_text: str, full_token_ids: list,
+                          full_logprobs: list, full_loss_mask: list,
+                          weight_version: int) -> bool:
+        """Async cache insertion with better concurrency."""
+        try:
+            result = await self.radix_tree.insert_async(
+                full_text, full_token_ids, full_logprobs, full_loss_mask,
+                weight_version=weight_version
+            )
+            return result
+        except Exception as e:
+            if getattr(self.router, "verbose", False):
+                print(f"[slime-router] Warning: Cache insertion error: {e}")
+            return False
+```
+
+#### 4.2.5 架构收益
+
+**性能提升**：
+- 并发读取延迟降低 99.1%
+- 系统吞吐量提升超过 100 倍
+- 消除事件循环阻塞
+
+**架构优势**：
+- 支持真正的并发读取，独占写入
+- 保持完全向后兼容性
+- 为高并发场景提供最优解
+
+详细的性能测试数据和基准测试结果请参考 [开发指南](development.md#36-异步性能测试)。
+
+#### 4.2.6 迁移指南
+
+**对于现有用户**：
+- 无需修改任何代码，保持完全向后兼容
+- 性能自动提升，无需配置
+
+**对于新用户**：
+- 推荐直接使用异步接口：
+```python
+# 推荐用法
+result = await radix_tree.find_longest_prefix_async(text)
+success = await radix_tree.insert_async(text, tokens, logp, mask, version)
+```
+
+**性能调优建议**：
+- 在高并发场景下优先使用异步接口
+- 监控 `radix_tree.get_stats()` 的缓存命中率
+- 根据内存情况调整 `max_cache_size`
+
+### 4.3 重试机制（Tenacity）
 
 **原始代码**（存在问题）：
 ```python

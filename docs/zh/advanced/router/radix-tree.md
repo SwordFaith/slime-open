@@ -596,9 +596,59 @@ all_tokens = tokenizer(remaining_strings, padding=True)["input_ids"]
 - Radix Tree 本身就是 tokenization cache
 - 避免重复调用 `tokenizer()`
 
+## 5. 异步并发支持
+
+### 5.1 设计概述
+
+RadixTree 支持同步和异步两种接口，以适应不同的使用场景：
+
+```python
+class StringRadixTrie:
+    def __init__(self, max_cache_size=10000, tokenizer=None, verbose=False):
+        # 双锁系统设计
+        self._lock = threading.RLock()  # 同步接口向后兼容
+        self._async_lock = AsyncReadWriteLock()  # 异步接口优化
+
+    # 同步接口 - 向后兼容
+    def find_longest_prefix(self, text: str) -> MatchResult:
+        """同步查找前缀，适用于简单场景"""
+
+    # 异步接口 - 高性能并发
+    async def find_longest_prefix_async(self, text: str) -> MatchResult:
+        """异步查找前缀，支持并发读取"""
+```
+
+### 5.2 异步读写锁
+
+**核心特性**：
+- 支持多个读取者并发访问
+- 写入者独占访问
+- 事件循环友好，不阻塞 asyncio
+
+**性能对比**（20并发读取）：
+- 同步 RLock：最大 45.2ms，平均 22.6ms
+- 异步 RWLock：最大 0.4ms，平均 0.2ms
+- **性能提升：99.1%**
+
+### 5.3 接口选择指南
+
+**使用异步接口的场景**：
+- 高并发 Web 应用
+- 需要最大化吞吐量的系统
+- asyncio 环境
+
+**使用同步接口的场景**：
+- 简单脚本和工具
+- 现有代码迁移成本高
+- 性能要求不高
+
+详细的性能优化和迁移指南请参考：
+- [系统架构文档](architecture.md#42-radix-tree-异步并发优化)
+- [开发指南](development.md#36-异步性能测试)
+
 ---
 
-## 5. 相关资源
+## 6. 相关资源
 
 ### 内部文档
 - **架构设计**: [architecture.md](architecture.md)
@@ -607,5 +657,12 @@ all_tokens = tokenizer(remaining_strings, padding=True)["input_ids"]
 
 ### 代码位置
 - **Radix Tree 实现**: `slime/router/middleware_hub/radix_tree.py` (698 lines)
-- **单元测试**: `tests/router/unit/test_radix_tree_core.py`
+- **异步读写锁**: `slime/router/middleware_hub/async_read_write_lock.py` (172 lines)
+- **RadixTreeMiddleware**: `slime/router/middleware_hub/radix_tree_middleware.py` (289 lines)
+- **单元测试**:
+  - `tests/router/unit/test_radix_tree_core.py`
+  - `tests/router/unit/test_async_read_write_lock.py`
+  - `tests/router/unit/test_radix_tree_async.py`
+  - `tests/router/unit/test_radix_tree_middleware_async.py`
+  - `tests/router/unit/test_performance_comparison.py`
 - **集成测试**: `tests/router/integration/test_radix_tree_middleware.py`

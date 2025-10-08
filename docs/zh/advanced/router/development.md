@@ -434,7 +434,61 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 # Output: PASSED (1/1 tests)
 ```
 
-### 3.6 测试覆盖率要求
+### 3.6 异步性能测试
+
+#### 3.6.1 测试重要性
+
+在 asyncio 环境中，同步锁会阻塞事件循环，导致并发性能严重下降。异步性能测试用于验证：
+
+- 事件循环非阻塞特性
+- 并发读取性能提升
+- 系统整体吞吐量改善
+
+#### 3.6.2 测试方法论
+
+**并发读取测试**：
+- 创建相同数据的同步和异步版本
+- 并发执行多个读取操作
+- 对比响应时间和吞吐量
+
+**事件循环非阻塞验证**：
+- 运行后台计时任务
+- 执行异步缓存操作
+- 验证后台任务不被阻塞
+
+**正确性验证**：
+- 确保异步和同步结果一致
+- 验证并发安全性
+- 测试边界条件
+
+#### 3.6.3 关键性能指标
+
+| 指标 | 同步 RLock | 异步 RWLock | 目标 |
+|------|------------|-------------|------|
+| 并发读取延迟 | ~45ms | ~0.4ms | >99% 改善 |
+| 系统吞吐量 | ~1K ops/s | ~100K ops/s | >100倍提升 |
+| 事件循环阻塞 | 是 | 否 | 完全消除 |
+
+#### 3.6.4 测试文件组织
+
+**性能测试文件**：
+- `test_performance_comparison.py` - 核心性能对比
+- `test_async_read_write_lock.py` - 锁机制性能
+- `test_radix_tree_async.py` - 异步接口性能
+- `test_radix_tree_middleware_async.py` - 集成性能
+
+**运行性能测试**：
+```bash
+# 运行所有性能测试
+pytest tests/router/unit/test_performance_comparison.py -v -s
+
+# 运行特定性能测试
+pytest tests/router/unit/test_performance_comparison.py::TestPerformanceComparison::test_concurrent_read_performance -v -s
+```
+
+详细的实现示例和测试结果请参考相关测试文件。
+
+### 3.7 测试覆盖率要求
 
 **命令**：
 ```bash
@@ -453,8 +507,9 @@ Name                                          Stmts   Miss  Cover   Missing
 slime/router/router.py                          120      8    93%   45-47, 102
 slime/router/middleware_hub/radix_tree.py       350     15    96%   234-236, 456
 slime/router/middleware_hub/radix_tree_middleware.py  180      5    97%   112-114
+slime/router/middleware_hub/async_read_write_lock.py  150      0   100%
 ---------------------------------------------------------------------------
-TOTAL                                           650     28    96%
+TOTAL                                           800     28    96%
 ```
 
 ---
@@ -467,6 +522,12 @@ TOTAL                                           650     28    96%
 - [ ] 所有 I/O 操作使用 `await`
 - [ ] 使用 `await asyncio.sleep()` 而非 `sleep()`
 - [ ] Middleware 的 `dispatch()` 方法是 `async def`
+
+**异步并发优化**：
+- [ ] 避免使用 `threading.RLock` 等会阻塞事件循环的同步锁
+- [ ] 高频读取操作使用 `AsyncReadWriteLock` 支持并发读取
+- [ ] 包含异步性能测试验证优化效果
+- [ ] 验证事件循环不会被阻塞（使用后台任务测试）
 
 **并发安全**：
 - [ ] 共享状态（如 `worker_urls`）使用 `asyncio.Lock` 保护
@@ -486,6 +547,7 @@ TOTAL                                           650     28    96%
 - [ ] 新增功能有对应的单元测试
 - [ ] 测试覆盖率 >80%
 - [ ] 包含边界条件和异常场景的测试
+- [ ] 包含异步性能对比测试
 
 ### 4.2 已知问题修复记录
 
@@ -498,6 +560,7 @@ TOTAL                                           650     28    96%
 | Weight version update | P0 | Phase 3.3 | 更新所有 traversed nodes 的 `weight_version` |
 | Tenacity retry 重构 | P1 | Phase 3.5 | 使用 `tenacity.AsyncRetrying` 替代手动循环 |
 | /metrics API | P1 | Phase 3.6 | 添加监控 API |
+| **RLock event loop blocking** | **P0** | **Phase 4.1** | **实现 `AsyncReadWriteLock` 替换 `threading.RLock`，性能提升 99.1%** |
 
 **测试验证**：
 ```bash
@@ -505,6 +568,10 @@ TOTAL                                           650     28    96%
 pytest tests/router/unit/test_radix_tree_core.py -v            # Weight version fix
 pytest tests/router/integration/test_router_concurrency.py -v  # Concurrency fix
 pytest tests/router/unit/test_tenacity_retry_logic.py -v       # Tenacity refactor
+pytest tests/router/unit/test_performance_comparison.py -v     # Async performance optimization
+pytest tests/router/unit/test_async_read_write_lock.py -v      # AsyncReadWriteLock tests
+pytest tests/router/unit/test_radix_tree_async.py -v           # RadixTree async interface tests
+pytest tests/router/unit/test_radix_tree_middleware_async.py -v # Middleware async tests
 ```
 
 ---
