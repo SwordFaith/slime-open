@@ -229,9 +229,116 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
 
 ---
 
-## 3. 测试策略
+## 3. 组件依赖注入架构 (2025-10-09)
 
-### 3.1 分层测试架构
+### 3.1 ComponentRegistry 开发指南
+
+ComponentRegistry 是 Slime Router 的核心组件管理系统。详细的使用方法和概念介绍请参考 [用户指南](user-guide.md#componentregistry-架构)。
+
+#### 3.1.1 开发者最佳实践
+
+**自定义 Middleware 开发**：
+```python
+class CustomMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, router):
+        super().__init__(app)
+        self.router = router
+
+        # 创建自定义组件
+        self.custom_cache = CustomCache(max_size=5000)
+        self.metrics_collector = MetricsCollector()
+
+        # 确保注册表存在
+        if not hasattr(router, 'component_registry'):
+            router.component_registry = ComponentRegistry()
+
+        # 注册组件
+        router.component_registry.register("custom_cache", self.custom_cache)
+        router.component_registry.register("metrics", self.metrics_collector)
+```
+
+**错误处理模式**：
+```python
+def safe_get_component(router, name: str, fallback=None):
+    """Safely get a component with optional fallback."""
+    try:
+        if hasattr(router, 'component_registry'):
+            return router.component_registry.get(name)
+        else:
+            logger.warning("Component registry not initialized")
+            return fallback
+    except RuntimeError as e:
+        logger.warning(f"Component '{name}' not found: {e}")
+        return fallback
+```
+
+### 3.2 迁移指南
+
+从硬编码到配置驱动的迁移方法和配置示例请参考 [用户指南](user-guide.md#componentregistry-架构)。
+
+**测试要点**：
+- 使用 mock 对象测试组件注册
+- 验证必需组件的存在性
+- 测试错误处理机制
+
+详细的迁移步骤和配置示例请参考用户指南的相关章节。
+
+### 3.3 最佳实践
+
+#### 3.3.1 组件命名规范
+
+**推荐命名**：
+- `tokenizer` - HuggingFace tokenizer 实例
+- `radix_tree` - Radix Tree 缓存实例
+- `metrics` - 指标收集器
+- `cache` - 自定义缓存
+- `logger` - 日志记录器
+- `health_checker` - 健康检查器
+
+**避免命名**：
+- `tkn` - 过于简短的缩写
+- `tree` - 容易与其他 tree 混淆
+- `data` - 过于通用
+- `temp` - 临时组件应该明确用途
+
+#### 3.3.2 组件生命周期管理
+
+**初始化顺序**：
+1. 创建 ComponentRegistry 实例
+2. 按依赖顺序初始化组件
+3. 注册组件到注册表
+4. 验证所有必需组件已注册
+
+**清理资源**：
+```python
+class CleanupMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, router):
+        super().__init__(app)
+        self.router = router
+
+        # 注册清理函数
+        import atexit
+        atexit.register(self.cleanup_resources)
+
+    def cleanup_resources(self):
+        """Cleanup registered components."""
+        if hasattr(self.router, 'component_registry'):
+            # 清理缓存
+            if self.router.component_registry.has("radix_tree"):
+                tree = self.router.component_registry.get("radix_tree")
+                tree.clear()
+
+            # 关闭连接
+            if self.router.component_registry.has("database"):
+                db = self.router.component_registry.get("database")
+                db.close()
+```
+
+---
+
+## 4. 测试策略
+
+### 4.1 分层测试架构
 
 **三层测试金字塔**：
 
@@ -256,7 +363,7 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
 | **Integration Tests** | Mock 外部依赖 | Mock FastAPI, SGLang | 快 (~10s) | >80% |
 | **E2E Tests** | 完整服务测试 | 真实 SGLang server | 慢 (~60s) | >60% |
 
-### 3.2 Unit Tests
+### 4.2 Unit Tests
 
 **目录**: `tests/router/unit/`
 
@@ -296,7 +403,7 @@ def test_radix_tree_insert_and_query():
 pytest tests/router/unit/ -v
 ```
 
-### 3.3 Integration Tests
+### 4.3 Integration Tests
 
 **目录**: `tests/router/integration/`
 
@@ -357,7 +464,7 @@ async def test_middleware_cache_insertion(mocker):
 pytest tests/router/integration/ -v
 ```
 
-### 3.4 E2E Tests
+### 4.4 E2E Tests
 
 **目录**: `tests/router/e2e/`
 
@@ -386,7 +493,7 @@ python -m sglang.launch_server --model-path /path/to/model --port 10090
 pytest tests/router/e2e/ -m "e2e" -v
 ```
 
-### 3.5 TDD 工作流
+### 4.5 TDD 工作流
 
 **Test-Driven Development 变体流程**：
 
@@ -434,9 +541,9 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 # Output: PASSED (1/1 tests)
 ```
 
-### 3.6 异步性能测试
+### 4.6 异步性能测试
 
-#### 3.6.1 测试重要性
+#### 4.6.1 测试重要性
 
 在 asyncio 环境中，同步锁会阻塞事件循环，导致并发性能严重下降。异步性能测试用于验证：
 
@@ -444,7 +551,7 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 - 并发读取性能提升
 - 系统整体吞吐量改善
 
-#### 3.6.2 测试方法论
+#### 4.6.2 测试方法论
 
 **并发读取测试**：
 - 创建相同数据的同步和异步版本
@@ -461,7 +568,7 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 - 验证并发安全性
 - 测试边界条件
 
-#### 3.6.3 关键性能指标
+#### 4.6.3 关键性能指标
 
 | 指标 | 同步 RLock | 异步 RWLock | 目标 |
 |------|------------|-------------|------|
@@ -469,7 +576,7 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 | 系统吞吐量 | ~1K ops/s | ~100K ops/s | >100倍提升 |
 | 事件循环阻塞 | 是 | 否 | 完全消除 |
 
-#### 3.6.4 测试文件组织
+#### 4.6.4 测试文件组织
 
 **性能测试文件**：
 - `test_performance_comparison.py` - 核心性能对比
@@ -488,7 +595,7 @@ pytest tests/router/unit/test_performance_comparison.py::TestPerformanceComparis
 
 详细的实现示例和测试结果请参考相关测试文件。
 
-### 3.7 测试覆盖率要求
+### 4.7 测试覆盖率要求
 
 **命令**：
 ```bash

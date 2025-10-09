@@ -103,15 +103,40 @@ def mock_tokenizer():
     """Create a mock tokenizer."""
     tokenizer = MagicMock()
     tokenizer.decode.return_value = "Hello world"
+    # Mock the tokenizer call that returns a dict with input_ids
+    tokenizer.return_value = {"input_ids": []}  # Default empty
+    # For empty remaining_string, should return empty list
+    tokenizer.side_effect = lambda text, add_special_tokens=True: {"input_ids": [] if not text else [ord(c) for c in text]}
     return tokenizer
 
 
 @pytest.fixture
 def mock_radix_tree():
     """Create a mock radix tree."""
+    from unittest.mock import AsyncMock, MagicMock
+
     tree = MagicMock()
+    # Mock async methods
+    tree.find_longest_prefix_async = AsyncMock()
+    tree.get_or_create_tokenization_async = AsyncMock()
+    tree.insert_async = AsyncMock(return_value=True)
+
+    # Mock sync methods for backward compatibility
     tree.retrieve_from_text.return_value = ([1, 2, 3], [0.1, 0.2, 0.3], [1, 1, 1])
     tree.insert.return_value = True
+
+    # Mock get_or_create_tokenization_async to return 4-tuple
+    tree.get_or_create_tokenization_async.return_value = ([1, 2, 3], [0.1, 0.2, 0.3], [1, 1, 1], [3, 3, 3])
+
+    # Mock MatchResult for find_longest_prefix_async
+    mock_result = MagicMock()
+    mock_result.matched_prefix = "Hello world"
+    mock_result.token_ids = [1, 2, 3]
+    mock_result.logp = [0.1, 0.2, 0.3]
+    mock_result.loss_mask = [1, 1, 1]
+    mock_result.remaining_string = ""  # Empty remaining string for full match
+    tree.find_longest_prefix_async.return_value = mock_result
+
     return tree
 
 
@@ -139,15 +164,16 @@ async def test_retrieve_cache(middleware_with_mocks, mock_radix_tree):
     middleware = middleware_with_mocks
     input_text = "Hello world"
 
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache(input_text)
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache(input_text)
 
-    # Verify radix_tree.retrieve_from_text was called correctly
-    mock_radix_tree.retrieve_from_text.assert_called_once_with(input_text, return_logprob=True)
+    # Verify radix_tree.get_or_create_tokenization_async was called correctly
+    mock_radix_tree.get_or_create_tokenization_async.assert_called_once_with(input_text)
 
-    # Verify return values
-    assert tokens == [1, 2, 3]
-    assert logprobs == [0.1, 0.2, 0.3]
-    assert loss_mask == [1, 1, 1]
+    # Verify return values - should match mock_result (full match case)
+    assert tokens == [1, 2, 3]  # From mock_result.token_ids
+    assert logprobs == [0.1, 0.2, 0.3]  # From mock_result.logp
+    assert loss_mask == [1, 1, 1]  # From mock_result.loss_mask
+    assert versions == [3, 3, 3]  # From mock_result.generation_versions
 
 
 @pytest.mark.unit
@@ -164,8 +190,8 @@ async def test_insert_cache_success(middleware_with_mocks, mock_radix_tree):
         weight_version=5
     )
 
-    # Verify radix_tree.insert was called correctly
-    mock_radix_tree.insert.assert_called_once_with(
+    # Verify radix_tree.insert_async was called correctly
+    mock_radix_tree.insert_async.assert_called_once_with(
         "Hello world",
         [1, 2, 3],
         [0.1, 0.2, 0.3],
@@ -179,7 +205,7 @@ async def test_insert_cache_success(middleware_with_mocks, mock_radix_tree):
 async def test_insert_cache_with_exception(middleware_with_mocks, mock_radix_tree):
     """Test _insert_cache() method handles exceptions gracefully."""
     middleware = middleware_with_mocks
-    mock_radix_tree.insert.side_effect = Exception("Cache insertion failed")
+    mock_radix_tree.insert_async.side_effect = Exception("Cache insertion failed")
 
     # Should not raise exception
     await middleware._insert_cache(
@@ -190,8 +216,8 @@ async def test_insert_cache_with_exception(middleware_with_mocks, mock_radix_tre
         weight_version=5
     )
 
-    # Verify radix_tree.insert was still called
-    mock_radix_tree.insert.assert_called_once()
+    # Verify radix_tree.insert_async was still called
+    mock_radix_tree.insert_async.assert_called_once()
 
 
 @pytest.mark.unit
@@ -209,8 +235,8 @@ async def test_insert_cache_with_verbose_logging(middleware_with_mocks, mock_rad
         weight_version=5
     )
 
-    # Verify radix_tree.insert was called
-    mock_radix_tree.insert.assert_called_once()
+    # Verify radix_tree.insert_async was called
+    mock_radix_tree.insert_async.assert_called_once()
 
 
 @pytest.mark.unit

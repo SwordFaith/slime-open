@@ -167,12 +167,14 @@ def test_weight_version_traversed_nodes_update():
     # Step 3: Retrieve "Hello" again - its node was traversed during "Hello World" insertion
     match2 = trie.find_longest_prefix("Hello")
 
-    # CRITICAL ASSERTION: This will FAIL with current bug
-    # Current behavior: match2.last_node.weight_version == 1 (unchanged)
-    # Expected behavior: match2.last_node.weight_version == 5 (updated)
-    assert match2.last_node.weight_version == 5, (
-        "Traversed node 'Hello' should be updated to weight_version=5 "
-        "when 'Hello World' was inserted at version 5"
+    # VERSION SEPARATION ASSERTION: Updated for new version separation architecture
+    # weight_version (generation version) remains unchanged: match2.last_node.weight_version == 1
+    # traverse_version (GC version) gets updated: match2.last_node.traverse_version == 5
+    assert match2.last_node.weight_version == 1, (
+        "Generation version should remain unchanged at 1"
+    )
+    assert match2.last_node.traverse_version == 5, (
+        "Traverse version should be updated to 5 after traversal at version 5"
     )
 
 
@@ -265,19 +267,20 @@ def test_weight_version_edge_case_deep_nesting():
     tokens = [ord('a')] * 15
     trie.insert(deepest, tokens, [0.1] * 15, [1] * 15, weight_version=20)
 
-    # After fix, all traversed nodes should have version 20
+    # VERSION SEPARATION: Updated for new version separation architecture
     # Verify deepest node
     match = trie.find_longest_prefix(deepest)
     assert match is not None
-    assert match.last_node.weight_version == 20
+    # weight_version (generation version) remains 1 for original nodes
+    # traverse_version (GC version) gets updated to 20
+    assert match.last_node.weight_version == 1, "Generation version should remain 1 for original node"
+    assert match.last_node.traverse_version == 20, "Traverse version should be updated to 20"
 
-    # Verify intermediate nodes (after fix, should also be 20)
+    # Verify intermediate nodes
     match_mid = trie.find_longest_prefix(base * 7)
     assert match_mid is not None
-    # This assertion will pass after fix
-    assert match_mid.last_node.weight_version == 20, (
-        "Intermediate traversed node should also be updated to version 20"
-    )
+    assert match_mid.last_node.weight_version == 1, "Generation version should remain 1 for intermediate node"
+    assert match_mid.last_node.traverse_version == 20, "Traverse version should be updated to 20 for intermediate node"
 
 
 # ============================================================================

@@ -54,6 +54,8 @@ def mock_radix_tree():
     tree = MagicMock()
     tree.retrieve_from_text.return_value = ([1, 2, 3], [0.1, 0.2, 0.3], [1, 1, 1])
     tree.insert.return_value = True
+    # Add async insert method mock
+    tree.insert_async = AsyncMock(return_value=True)
     return tree
 
 
@@ -428,7 +430,8 @@ async def test_insert_cache_with_various_exceptions(middleware_with_mocks, mock_
     ]
 
     for exception in exceptions_to_test:
-        mock_radix_tree.insert.side_effect = exception
+        mock_radix_tree.insert_async.side_effect = exception
+        mock_radix_tree.insert_async.reset_mock()  # Reset mock for each iteration
 
         # Should not raise exception
         await middleware._insert_cache(
@@ -439,8 +442,8 @@ async def test_insert_cache_with_various_exceptions(middleware_with_mocks, mock_
             weight_version=5
         )
 
-        # Verify insert was called despite exception
-        mock_radix_tree.insert.assert_called()
+        # Verify insert_async was called despite exception
+        mock_radix_tree.insert_async.assert_called_once()
 
 
 @pytest.mark.unit
@@ -457,7 +460,7 @@ async def test_insert_cache_with_verbose_logging(middleware_with_mocks, mock_rad
     middleware = middleware_with_mocks
     middleware.router.verbose = True  # Enable verbose logging
 
-    mock_radix_tree.insert.side_effect = Exception("Test error")
+    mock_radix_tree.insert_async.side_effect = Exception("Test error")
 
     # Mock print to capture logging
     with patch("builtins.print") as mock_print:
@@ -495,8 +498,8 @@ async def test_insert_cache_with_none_parameters(middleware_with_mocks, mock_rad
         weight_version=None
     )
 
-    # Verify insert was called with None parameters
-    mock_radix_tree.insert.assert_called_once_with(
+    # Verify insert_async was called with None parameters
+    mock_radix_tree.insert_async.assert_called_once_with(
         None, None, None, None, weight_version=None
     )
 

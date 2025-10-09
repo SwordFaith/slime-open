@@ -16,6 +16,8 @@ def mock_router():
     router = Mock()
     router.args = Mock()
     router.args.hf_checkpoint = "test-checkpoint"
+    router.args.radix_tree_max_size = 1000  # Set real value
+    router.args.verbose = False  # Set real value
     router.verbose = False
     return router
 
@@ -72,7 +74,7 @@ async def test_middleware_async_cache_retrieval(middleware):
     )
 
     # Test with cached content
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache("Hello world")
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Hello world")
 
     assert tokens == [1, 2, 3]
     assert len(logprobs) == 3
@@ -88,7 +90,7 @@ async def test_middleware_async_cache_retrieval_partial_match(middleware):
     )
 
     # Test with "Hello world" (partial match)
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache("Hello world")
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Hello world")
 
     # Should get cached "Hello" + tokenized " world"
     assert len(tokens) >= 2  # At least the cached "Hello" tokens
@@ -99,7 +101,7 @@ async def test_middleware_async_cache_retrieval_partial_match(middleware):
 @pytest.mark.asyncio
 async def test_middleware_async_cache_retrieval_no_match(middleware):
     """Test middleware with no cache match."""
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache("Unknown text")
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Unknown text")
 
     # Should return tokenized version of "Unknown text"
     assert len(tokens) > 0  # Should be tokenized
@@ -118,7 +120,7 @@ async def test_middleware_async_cache_insertion(middleware):
     assert result is True
 
     # Verify insertion worked by retrieving it
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache("Test insertion")
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Test insertion")
 
     assert tokens == [4, 5, 6]
     assert logprobs == [-0.4, -0.5, -0.6]
@@ -245,7 +247,7 @@ async def test_middleware_concurrent_operations(middleware):
 async def test_middleware_error_handling(middleware):
     """Test middleware error handling with async operations."""
     # Test with empty text (should not raise exception)
-    tokens, logprobs, loss_mask = await middleware._retrieve_cache("")
+    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("")
     assert tokens == []
     assert logprobs == []
     assert loss_mask == []

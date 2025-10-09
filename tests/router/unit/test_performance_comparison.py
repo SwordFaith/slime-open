@@ -144,6 +144,8 @@ class TestPerformanceComparison:
         mock_router = Mock()
         mock_router.args = Mock()
         mock_router.args.hf_checkpoint = "test-checkpoint"
+        mock_router.args.radix_tree_max_size = 1000  # Set real value
+        mock_router.args.verbose = False  # Set real value
         mock_router.verbose = False
 
         with patch('slime.router.middleware_hub.radix_tree_middleware.AutoTokenizer') as mock_tokenizer:
@@ -175,7 +177,7 @@ class TestPerformanceComparison:
 
             async def retrieve_cache():
                 start_time = time.time()
-                tokens, logprobs, loss_mask = await middleware._retrieve_cache("Hello world")
+                tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Hello world")
                 end_time = time.time()
                 retrieval_times.append(end_time - start_time)
                 return tokens

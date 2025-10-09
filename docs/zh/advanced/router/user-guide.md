@@ -19,15 +19,58 @@ Slime Router 是一个基于 FastAPI 的智能路由服务，为多轮对话场�
 ### 1. 启动 Router 服务
 
 ```bash
+# 基础启动命令
 python -m slime.ray.rollout \
   --sglang-router-ip 0.0.0.0 \
   --sglang-router-port 30000 \
   --hf-checkpoint /path/to/model \
   --use-slime-router \
   --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+
+# 完整启动命令（包含所有可选参数）
+python -m slime.ray.rollout \
+  --sglang-router-ip 0.0.0.0 \
+  --sglang-router-port 30000 \
+  --hf-checkpoint /path/to/model \
+  --radix-tree-max-size 10000 \
+  --verbose \
+  --use-slime-router \
+  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
 ```
 
-### 2. 注册 SGLang Workers
+### 2. 启动参数详解
+
+#### 必需参数
+
+- **`--hf-checkpoint`**: HuggingFace 模型检查点路径
+  - 用途：指定用于 tokenizer 初始化的模型路径
+  - 示例：`--hf-checkpoint /models/Qwen3-0.6B`
+  - 验证：启动时会检查路径是否存在，缺失则立即报错
+
+#### 可选参数
+
+- **`--radix-tree-max-size`**: Radix Tree 最大缓存大小
+  - 默认值：`10000`
+  - 用途：控制缓存的最大 token 数量
+  - 内存估算：约 16 bytes/token，10K tokens ≈ 160KB
+  - 推荐设置：
+    - 小规模实验：`10000` (默认)
+    - 中等规模：`50000` (≈ 800KB)
+    - 大规模生产：`200000` (≈ 3MB)
+
+- **`--verbose`**: 启用详细日志输出
+  - 默认值：`False`
+  - 用途：调试和性能分析时启用
+  - 输出：缓存命中率、请求处理时间等详细信息
+
+#### 其他 Router 参数
+
+- **`--sglang-router-ip`**: Router 服务监听 IP（默认：`0.0.0.0`）
+- **`--sglang-router-port`**: Router 服务端口（默认：`30000`）
+- **`--use-slime-router`**: 启用 Slime Router 功能
+- **`--slime-router-middleware-paths`**: 中间件模块路径，多个路径用逗号分隔
+
+### 3. 注册 SGLang Workers
 
 ```bash
 # 注册第一个 worker
@@ -40,7 +83,7 @@ curl -X POST "http://localhost:30000/add_worker?url=http://worker2:10090"
 curl "http://localhost:30000/list_workers"
 ```
 
-### 3. 使用缓存生成
+### 4. 使用缓存生成
 
 ```python
 import requests
@@ -62,6 +105,64 @@ response = requests.post("http://localhost:30000/generate", json={
         "temperature": 0.8
     }
 })
+```
+
+---
+
+## ComponentRegistry 架构
+
+### 什么是 ComponentRegistry？
+
+ComponentRegistry 是 Slime Router 的核心组件管理系统，提供统一的组件注册和获取机制，消除硬编码依赖。
+
+### 核心优势
+
+- **零硬编码**: 所有组件通过配置驱动，启动时验证依赖完整性
+- **快速失败**: 缺失组件会立即报错，避免运行时才发现问题
+- **统一管理**: 集中管理 tokenizer、radix_tree 等共享组件
+- **易于扩展**: 新组件只需注册即可使用
+
+### 自动组件注册
+
+当启用 `RadixTreeMiddleware` 时，以下组件会自动注册：
+
+```python
+# 自动注册的组件
+router.component_registry.register("tokenizer", tokenizer)           # HuggingFace tokenizer
+router.component_registry.register("radix_tree", radix_tree)         # Radix Tree 缓存
+```
+
+### 使用已注册组件
+
+```python
+# 获取 tokenizer
+tokenizer = router.component_registry.get("tokenizer")
+
+# 获取 radix tree
+radix_tree = router.component_registry.get("radix_tree")
+```
+
+### 错误处理
+
+```python
+# 组件缺失时的错误信息
+RuntimeError: Required component 'tokenizer' not found.
+Available components: ['radix_tree']
+```
+
+### 开发者自定义组件
+
+```python
+# 在自定义 middleware 中注册组件
+class CustomMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, router):
+        super().__init__(app)
+
+        # 创建自定义组件
+        self.metrics = MetricsCollector()
+
+        # 注册到全局注册表
+        router.component_registry.register("metrics", self.metrics)
 ```
 
 ---

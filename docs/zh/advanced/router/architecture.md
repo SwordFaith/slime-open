@@ -126,9 +126,120 @@ Root
 
 *详细算法实现请参考 [Radix Tree 文档](radix-tree.md)*
 
-### 2.3 Weight Version 管理
+### 2.3 组件依赖注入架构 (2025-10-09)
 
-#### 2.3.1 为什么需要 Weight Version？
+#### 2.3.1 设计动机
+
+**原有问题**：
+```python
+# 原有实现 - 使用 hasattr 检查
+def _get_tokenizer(self):
+    if not hasattr(self, 'component_registry'):
+        raise RuntimeError("Component registry not initialized")
+    return self.component_registry.get("tokenizer")
+
+# 硬编码参数
+if not hasattr(self.args, 'hf_checkpoint') or not self.args.hf_checkpoint:
+    raise ValueError("Missing required argument: --hf-checkpoint")
+```
+
+**架构问题**：
+- **hasattr 检查**: 运行时才发现组件缺失，错误延迟
+- **硬编码路径**: `"/path/to/Qwen3-0.6B"` 写死在代码中
+- **fallback 逻辑**: 复杂的错误处理和降级机制
+- **组件耦合**: 组件之间通过字符串名称隐式依赖
+
+#### 2.3.2 ComponentRegistry 设计
+
+**核心原则**：
+- **Zero fallback**: 组件必须显式注册，缺失即快速失败
+- **Fast failure**: 启动时检查依赖，立即发现问题
+- **Simple API**: 易于使用和测试
+
+**实现架构**：
+```python
+class ComponentRegistry:
+    """Centralized component registry for managing shared instances."""
+
+    def __init__(self):
+        self._components: Dict[str, Any] = {}
+
+    def register(self, name: str, instance: Any) -> None:
+        """Register a component instance with validation."""
+        if not name or not name.strip():
+            raise ValueError("Component name cannot be empty")
+        if instance is None:
+            raise ValueError("Component instance cannot be None")
+        self._components[name] = instance
+
+    def get(self, name: str) -> Any:
+        """Get a registered component with clear error messages."""
+        if name not in self._components:
+            available = list(self._components.keys())
+            raise RuntimeError(
+                f"Required component '{name}' not found. "
+                f"Available components: {available}"
+            )
+        return self._components[name]
+```
+
+**架构优势**：
+- **类型安全**: 编译时和运行时双重检查
+- **清晰错误**: 明确指出缺失组件和可用组件
+- **零魔法**: 无隐式转换，无 fallback 逻辑
+- **易于测试**: 可以轻松 mock 组件进行单元测试
+
+#### 2.3.3 配置驱动的参数管理
+
+**新架构的核心改进**：
+- **零硬编码**: 所有路径通过参数配置，消除代码中的硬编码路径
+- **参数验证**: 启动时检查必需参数，缺失立即报错
+- **自动注册**: Middleware 自动注册组件到全局注册表
+
+**关键参数**：
+- `--hf-checkpoint`: HuggingFace 模型路径（必需）
+- `--radix-tree-max-size`: 缓存大小限制（默认：10000）
+- `--verbose`: 详细日志输出（可选）
+
+**自动注册的组件**：
+- `tokenizer`: HuggingFace tokenizer 实例
+- `radix_tree`: 前缀缓存实例
+
+详细的参数配置和使用示例请参考 [用户指南](user-guide.md#2-启动参数详解)。
+
+#### 2.3.4 架构改进对比
+
+| 方面 | 原有架构 | 新架构 |
+|------|----------|--------|
+| **配置方式** | 硬编码路径 | 参数化配置 |
+| **组件检查** | `hasattr()` 运行时检查 | 启动时验证，快速失败 |
+| **错误处理** | 复杂的 fallback 逻辑 | 简化的异常处理 |
+| **依赖管理** | 隐式依赖 | 显式依赖注入 |
+| **可维护性** | 组件耦合严重 | 清晰的依赖关系 |
+
+**核心收益**：
+- 零硬编码，所有配置外部化
+- 启动时验证，避免运行时错误
+- 统一的组件管理机制
+- 更好的可测试性和可维护性
+
+#### 2.3.5 迁移指南
+
+**兼容性保证**：
+- **API 兼容**: 所有现有接口保持不变
+- **配置兼容**: 新参数为必需，但提供清晰的错误提示
+- **属性兼容**: `router.radix_tree` 仍然可用（向后兼容）
+
+**迁移步骤**：
+1. 添加 `--hf-checkpoint` 参数指定模型路径
+2. 可选调整 `--radix-tree-max-size` 优化内存使用
+3. 启用 `--verbose` 调试模式（如需要）
+
+**开发者指南**：详细的 ComponentRegistry 使用方法请参考 [用户指南](user-guide.md#componentregistry-架构)。
+
+### 2.4 Weight Version 管理
+
+#### 2.4.1 为什么需要 Weight Version？
 
 **问题场景**：
 ```
@@ -140,7 +251,7 @@ Root
 
 **核心问题**: 旧版本模型的 logp 不能用于当前版本的训练。
 
-#### 2.3.2 "最新 Hit Version" 语义
+#### 2.4.2 "最新 Hit Version" 语义
 
 **设计决策**: 所有被 "hit"（traversed）的节点，更新其 `weight_version` 到当前最新版本。
 
@@ -157,7 +268,7 @@ for node in traversed_nodes:
 - Cache 中的 logp 始终对应当前或近期的 policy
 - 避免使用过期的 logp 导致训练错误
 
-#### 2.3.3 GC 触发策略
+#### 2.4.3 GC 触发策略
 
 **基于 Weight Version 的 GC**：
 ```python
@@ -410,108 +521,23 @@ class AsyncReadWriteLock:
 - 使用 `asyncio.Condition`，不阻塞事件循环
 - 支持调试模式跟踪锁状态
 
-#### 4.2.3 RadixTree 异步接口
+#### 4.2.3 异步接口设计
 
-**向后兼容的异步接口**：
+**向后兼容性**：
+- 保持所有同步接口不变
+- 新增异步接口用于高并发场景
+- 自动检测运行环境，选择最优实现
 
-```python
-class StringRadixTrie:
-    def __init__(self, max_cache_size=10000, tokenizer=None, verbose=False):
-        # ... 原有代码
-        self._async_lock = AsyncReadWriteLock(debug=False)
+**核心异步方法**：
+- `find_longest_prefix_async()`: 支持并发读取的缓存查询
+- `insert_async()`: 独占写入的缓存插入
 
-    # 保持同步接口兼容性
-    def find_longest_prefix(self, text: str) -> MatchResult:
-        """Synchronous interface - wraps async implementation."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If called from async context, use sync fallback
-                with self._lock:  # Use original RLock for backward compatibility
-                    return self._find_longest_prefix_internal(text)
-            else:
-                # If called from sync context, run async method
-                return loop.run_until_complete(self.find_longest_prefix_async(text))
-        except RuntimeError:
-            # No event loop available, use sync fallback
-            with self._lock:
-                return self._find_longest_prefix_internal(text)
+**Middleware 集成**：
+- 自动使用异步接口提升并发性能
+- 保持原有的业务逻辑不变
+- 错误处理和降级机制
 
-    # 新增异步接口
-    async def find_longest_prefix_async(self, text: str) -> MatchResult:
-        """Asynchronous interface with concurrent read support."""
-        async with read_lock(self._async_lock):
-            # Temporarily disable original lock to prevent double locking
-            original_lock = self._lock
-            self._lock = None
-            try:
-                result = self._find_longest_prefix_internal(text)
-            finally:
-                self._lock = original_lock
-            return result
-
-    async def insert_async(self, text: str, token_ids: List[int],
-                         logp: List[float], loss_mask: List[int],
-                         weight_version: int) -> bool:
-        """Asynchronous insert with exclusive write access."""
-        async with write_lock(self._async_lock):
-            original_lock = self._lock
-            self._lock = None
-            try:
-                return self._insert_internal(text, token_ids, logp, loss_mask, weight_version)
-            finally:
-                self._lock = original_lock
-```
-
-#### 4.2.4 Middleware 异步优化
-
-**异步缓存操作**：
-
-```python
-class RadixTreeMiddleware(BaseHTTPMiddleware):
-    async def _retrieve_cache(self, input_text: str) -> tuple:
-        """Async cache retrieval with better concurrency."""
-        try:
-            # 使用异步接口，支持并发读取
-            result = await self.radix_tree.find_longest_prefix_async(input_text)
-
-            if result.matched_prefix and result.token_ids:
-                # 缓存命中，返回缓存结果
-                additional_tokens = self.tokenizer(result.remaining_string, add_special_tokens=False)["input_ids"]
-                return (
-                    result.token_ids + additional_tokens,
-                    (result.logp + len(additional_tokens) * [0.0]
-                     if result.logp is not None
-                     else [0] * len(result.token_ids + additional_tokens)),
-                    result.loss_mask + len(additional_tokens) * [0],
-                )
-            # 缓存未命中，使用 tokenizer
-            if self.tokenizer and input_text:
-                tokens = self.tokenizer(input_text, add_special_tokens=False)["input_ids"]
-                return tokens, [0.0] * len(tokens), [0] * len(tokens)
-            else:
-                return [], [], []
-        except Exception as e:
-            # TODO: Phase 2 - Implement structured error handling with security validation
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Cache retrieval error: {e}")
-            return [], [], []
-
-    async def _insert_cache(self, full_text: str, full_token_ids: list,
-                          full_logprobs: list, full_loss_mask: list,
-                          weight_version: int) -> bool:
-        """Async cache insertion with better concurrency."""
-        try:
-            result = await self.radix_tree.insert_async(
-                full_text, full_token_ids, full_logprobs, full_loss_mask,
-                weight_version=weight_version
-            )
-            return result
-        except Exception as e:
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Cache insertion error: {e}")
-            return False
-```
+详细的实现代码和性能测试请参考 [开发指南](development.md#4-异步并发优化)。
 
 #### 4.2.5 架构收益
 
@@ -559,48 +585,17 @@ for _ in range(5):
 
 **问题**：`sleep(30)` 是同步调用，会阻塞整个 event loop 30 秒。
 
-**修复方案**（使用 tenacity）：
-```python
-from tenacity import AsyncRetrying, stop_after_attempt, wait_fixed, RetryError
-
-async def _generate_with_retry(self, request: Request, call_next):
-    """Generate with automatic retry on SGLang abort (max 5 attempts, 30s wait)."""
-    last_response = None
-    last_response_data = None
-
-    async def _single_attempt():
-        nonlocal last_response, last_response_data
-
-        response = await call_next(request)
-        response_data = self._parse_response(response)
-
-        # Save BEFORE raising exception
-        last_response = response
-        last_response_data = response_data
-
-        if _is_response_aborted(response_data):
-            raise Exception("SGLang abort - retry needed")
-
-        return (response, response_data)
-
-    try:
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(5),
-            wait=wait_fixed(30),  # ✅ Non-blocking async wait
-            reraise=False
-        ):
-            with attempt:
-                await _single_attempt()
-    except RetryError:
-        pass
-
-    return last_response, last_response_data
-```
+**修复方案**：
+- 使用 `tenacity.AsyncRetrying` 替代手动重试循环
+- `wait_fixed(30)` 使用异步 `asyncio.sleep()`，避免事件循环阻塞
+- 保留最后一次响应，确保重试耗尽后仍有返回结果
 
 **关键改进**：
-1. 使用 `AsyncRetrying` 替代手动循环
-2. `wait_fixed(30)` 使用 `asyncio.sleep()` 实现，不阻塞 event loop
-3. `nonlocal` 机制保证重试耗尽后返回最后一次响应
+1. 非阻塞的异步等待机制
+2. 声明式的重试策略配置
+3. 更可靠的错误处理和状态管理
+
+详细的实现代码请参考 [开发指南](development.md#重试机制)。
 
 ---
 
