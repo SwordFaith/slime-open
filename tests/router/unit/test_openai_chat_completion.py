@@ -500,6 +500,305 @@ class TestConcurrencySafety:
         assert mock_radix_tree.find_longest_prefix_async.call_count == 10
 
 
+class TestMultiTurnConversationCache:
+    """Test multi-turn conversation caching scenarios that validate the Radix Cache fix."""
+
+    @pytest.fixture
+    def mock_radix_tree(self):
+        """Mock RadixTree with async methods for multi-turn testing."""
+        tree = AsyncMock()
+        tree.find_longest_prefix_async = AsyncMock()
+        tree.insert_async = AsyncMock()
+        return tree
+
+    @pytest.fixture
+    def mock_generate_api_handler(self):
+        """Mock generate API handler with stream support."""
+        handler = AsyncMock()
+        handler.return_value = {
+            "output_token_ids": [100, 101, 102],
+            "output_text": "I'm doing well! How about you?",
+            "request_id": "req-123",
+        }
+
+        # Mock streaming support
+        async def mock_stream(request_data):
+            """Mock streaming response."""
+            chunks = [
+                {"text": "I'm", "finished": False},
+                {"text": " doing", "finished": False},
+                {"text": " well!", "finished": False},
+                {"text": "", "finished": True, "finish_reason": "stop"}
+            ]
+            for chunk in chunks:
+                yield chunk
+
+        handler.stream = mock_stream
+        return handler
+
+    @pytest.fixture
+    def mock_tokenizer(self):
+        """Mock HuggingFace tokenizer for multi-turn conversations."""
+        tokenizer = MagicMock()
+
+        def mock_apply_chat_template(messages, tokenize=False, add_generation_prompt=True):
+            """Simulate chat template formatting for multi-turn conversations."""
+            formatted_parts = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    formatted_parts.append(f"System: {msg['content']}")
+                elif msg["role"] == "user":
+                    formatted_parts.append(f"User: {msg['content']}")
+                elif msg["role"] == "assistant":
+                    formatted_parts.append(f"Assistant: {msg['content']}")
+
+            if add_generation_prompt:
+                formatted_parts.append("Assistant:")
+
+            return "\n".join(formatted_parts)
+
+        tokenizer.apply_chat_template = mock_apply_chat_template
+        tokenizer.encode = MagicMock(side_effect=lambda text: list(range(len(text.split()))))
+        return tokenizer
+
+    @pytest.mark.asyncio
+    async def test_first_turn_cache_miss(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
+        """Test first turn of conversation results in cache miss."""
+        # Setup cache miss response
+        cache_miss_result = MatchResult(
+            matched_prefix="",
+            token_ids=[],
+            logp=[],
+            loss_mask=[],
+            remaining_string="User: Hello!",
+            last_node=StringTreeNode()
+        )
+        mock_radix_tree.find_longest_prefix_async.return_value = cache_miss_result
+
+        handler = ChatCompletionHandler(
+            radix_tree=mock_radix_tree,
+            tokenizer=mock_tokenizer,
+            generate_api_handler=mock_generate_api_handler
+        )
+
+        request = ChatCompletionRequest(
+            model="slime-model",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello!"}
+            ],
+            stream=False
+        )
+
+        response = await handler.handle_request(request)
+
+        # Verify response format
+        assert response["object"] == "chat.completion"
+        assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
+
+        # Verify cache insertion was called with complete conversation
+        mock_radix_tree.insert_async.assert_called_once()
+        call_args = mock_radix_tree.insert_async.call_args[0]
+
+        # Should contain the full conversation (prompt + response)
+        expected_full_text = "System: You are helpful.\nUser: Hello!\nAssistant:I'm doing well! How about you?"
+        assert call_args[0] == expected_full_text
+
+    @pytest.mark.asyncio
+    async def test_second_turn_cache_hit(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
+        """Test second turn of conversation benefits from cache hit."""
+        # Setup cache hit response for conversation prefix
+        cached_node = StringTreeNode()
+        cached_node.string_key = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well!"
+        cached_node.token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
+        cached_node.logp = [-0.1] * 8
+        cached_node.loss_mask = [0] * 8
+
+        cache_hit_result = MatchResult(
+            matched_prefix="System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well!",
+            token_ids=[1, 2, 3, 4, 5, 6, 7, 8],
+            logp=[-0.1] * 8,
+            loss_mask=[0] * 8,
+            remaining_string="User: How are you today?",
+            last_node=cached_node
+        )
+        mock_radix_tree.find_longest_prefix_async.return_value = cache_hit_result
+
+        # Mock updated generate response
+        mock_generate_api_handler.return_value = {
+            "output_token_ids": [200, 201, 202],
+            "output_text": "I'm great, thanks for asking!",
+            "request_id": "req-456",
+        }
+
+        handler = ChatCompletionHandler(
+            radix_tree=mock_radix_tree,
+            tokenizer=mock_tokenizer,
+            generate_api_handler=mock_generate_api_handler
+        )
+
+        request = ChatCompletionRequest(
+            model="slime-model",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello!"},
+                {"role": "assistant", "content": "I'm doing well! How about you?"},
+                {"role": "user", "content": "How are you today?"}
+            ],
+            stream=False
+        )
+
+        response = await handler.handle_request(request)
+
+        # Verify response
+        assert response["choices"][0]["message"]["content"] == "I'm great, thanks for asking!"
+
+        # Verify cache was queried with the full conversation text
+        expected_query = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well! How about you?\nUser: How are you today?\nAssistant:"
+        mock_radix_tree.find_longest_prefix_async.assert_called_once_with(expected_query)
+
+        # Verify cache was updated with extended conversation
+        assert mock_radix_tree.insert_async.call_count == 1
+        call_args = mock_radix_tree.insert_async.call_args[0]
+
+        # Should contain the extended conversation
+        expected_extended = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well! How about you?\nUser: How are you today?\nAssistant:I'm great, thanks for asking!"
+        assert call_args[0] == expected_extended
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_streaming_with_cache(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
+        """Test streaming responses work correctly with multi-turn caching."""
+        # Setup partial cache hit
+        cached_node = StringTreeNode()
+        cached_node.string_key = "System: You are helpful.\nUser: Tell me a joke"
+        cached_node.token_ids = [1, 2, 3, 4]
+        cached_node.logp = [-0.1] * 4
+        cached_node.loss_mask = [0] * 4
+
+        cache_hit_result = MatchResult(
+            matched_prefix="System: You are helpful.\nUser: Tell me a joke",
+            token_ids=[1, 2, 3, 4],
+            logp=[-0.1] * 4,
+            loss_mask=[0] * 4,
+            remaining_string="Assistant:",
+            last_node=cached_node
+        )
+        mock_radix_tree.find_longest_prefix_async.return_value = cache_hit_result
+
+        handler = ChatCompletionHandler(
+            radix_tree=mock_radix_tree,
+            tokenizer=mock_tokenizer,
+            generate_api_handler=mock_generate_api_handler
+        )
+
+        request = ChatCompletionRequest(
+            model="slime-model",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Tell me a joke"}
+            ],
+            stream=True
+        )
+
+        # Collect streaming response
+        stream_chunks = []
+        response = await handler.handle_request(request)
+
+        if hasattr(response, 'body_iterator'):
+            # Handle StreamingResponse
+            async for line in response.body_iterator:
+                if isinstance(line, bytes):
+                    stream_chunks.append(line.decode('utf-8'))
+                else:
+                    stream_chunks.append(str(line))
+        else:
+            # Handle unexpected response type
+            stream_chunks.append(str(response))
+
+        # Verify streaming format
+        assert len(stream_chunks) > 0
+        assert any("data:" in chunk for chunk in stream_chunks)
+
+        # Verify cache was updated after streaming
+        mock_radix_tree.insert_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cache_disabled_scenario(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
+        """Test behavior when caching is explicitly disabled."""
+        handler = ChatCompletionHandler(
+            radix_tree=mock_radix_tree,
+            tokenizer=mock_tokenizer,
+            generate_api_handler=mock_generate_api_handler,
+            enable_cache=False  # Cache disabled
+        )
+
+        request = ChatCompletionRequest(
+            model="slime-model",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello!"}
+            ],
+            stream=False
+        )
+
+        response = await handler.handle_request(request)
+
+        # Verify response still works
+        assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
+
+        # Verify cache was NOT queried
+        mock_radix_tree.find_longest_prefix_async.assert_not_called()
+
+        # Verify cache was NOT updated
+        mock_radix_tree.insert_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_multi_turn_cache_access(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
+        """Test concurrent access to cache during multi-turn conversations."""
+        # Setup cache response
+        cache_result = MatchResult(
+            matched_prefix="System: You are helpful.\nUser: Hello",
+            token_ids=[1, 2, 3],
+            logp=[-0.1, -0.2, -0.1],
+            loss_mask=[0, 0, 0],
+            remaining_string=" there!",
+            last_node=StringTreeNode()
+        )
+        mock_radix_tree.find_longest_prefix_async.return_value = cache_result
+
+        handler = ChatCompletionHandler(
+            radix_tree=mock_radix_tree,
+            tokenizer=mock_tokenizer,
+            generate_api_handler=mock_generate_api_handler
+        )
+
+        # Create multiple concurrent requests for the same conversation
+        request = ChatCompletionRequest(
+            model="slime-model",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello there!"}
+            ],
+            stream=False
+        )
+
+        # Execute concurrent requests
+        tasks = [handler.handle_request(request) for _ in range(5)]
+        responses = await asyncio.gather(*tasks)
+
+        # Verify all requests succeeded
+        assert len(responses) == 5
+        for response in responses:
+            assert response["object"] == "chat.completion"
+            assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
+
+        # Verify cache was accessed concurrently
+        assert mock_radix_tree.find_longest_prefix_async.call_count == 5
+
+        # Verify cache was updated for each request
+        assert mock_radix_tree.insert_async.call_count == 5
+
+
 class TestIntegrationHelpers:
     """Test helper functions and utilities."""
 
