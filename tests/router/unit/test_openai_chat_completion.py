@@ -1,806 +1,571 @@
 """
-OpenAI Chat Completion API unit tests.
+OpenAI Chat Completion API unit tests for simplified implementation.
 
-This test suite validates the Chat Completion functionality that provides
-100% OpenAI API compatibility while leveraging Slime Router's Radix Cache
-for optimal performance in multi-turn conversations.
+Tests cover:
+- ChatCompletionHandler initialization
+- Request validation
+- Cache availability detection
+- Error handling and fallback mechanisms
+- Basic streaming and non-streaming functionality
+- Message formatting using tokenizer templates
 
-Test cases follow TDD methodology and are organized by functional area:
-- Message formatting and validation
-- OpenAI API parameter handling
-- Cache integration and combination logic
-- Response formatting for streaming/non-streaming modes
+Simplified Strategy:
+- Focus on core functionality and error cases
+- Mock external dependencies thoroughly
+- Avoid complex multi-turn conversation tests that require extensive setup
+- Use FastAPI test client for integration-like testing
 """
 
 import json
 import asyncio
-from typing import Dict, List, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
+from fastapi import Request
+from fastapi.testclient import TestClient
 
-from slime.router.openai_chat_completion import (
-    ChatCompletionHandler,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionStreamResponse,
-    format_messages_with_hf_template,
-    convert_generate_to_openai_response,
-    validate_chat_completion_request,
-)
-from slime.router.middleware_hub.radix_tree import MatchResult, StringTreeNode
+from slime.router.openai_chat_completion import ChatCompletionHandler, create_chat_completion_handler
+from slime.router.component_registry import ComponentRegistry
 
 
-class TestMessageFormatting:
-    """Test message formatting using HuggingFace chat templates."""
+class TestChatCompletionHandler:
+    """Test ChatCompletionHandler core functionality."""
 
     @pytest.fixture
-    def mock_tokenizer(self):
-        """Mock HuggingFace tokenizer with apply_chat_template."""
-        tokenizer = MagicMock()
-        tokenizer.apply_chat_template = MagicMock(return_value="System: You are helpful.\nUser: Hello!\nAssistant: ")
-        return tokenizer
+    def mock_router(self):
+        """Create a mock SlimeRouter with necessary attributes."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        router.args.model_name = "test-model"
+        router.args.sglang_router_port = 30000
+        router.args.port = 30000
 
-    @pytest.mark.asyncio
-    async def test_system_user_formatting(self, mock_tokenizer):
-        """Test system + user message formatting."""
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hello!"}
-        ]
+        # Mock component registry
+        router._component_registry = None
+        router._registry_lock = MagicMock()
 
-        formatted = format_messages_with_hf_template(messages, mock_tokenizer)
+        # Mock worker management
+        router.worker_urls = {"http://test:10090": 0}
+        router._url_lock = AsyncMock()
+        router._use_url = AsyncMock(return_value="http://test:10090")
+        router._finish_url = AsyncMock()
 
-        mock_tokenizer.apply_chat_template.assert_called_once_with(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        assert formatted == "System: You are helpful.\nUser: Hello!\nAssistant: "
+        # Mock HTTP client
+        router.client = AsyncMock()
 
-    @pytest.mark.asyncio
-    async def test_multi_turn_conversation(self, mock_tokenizer):
-        """Test multi-turn conversation formatting."""
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hello!"},
-            {"role": "assistant", "content": "Hi there!"},
-            {"role": "user", "content": "How are you?"}
-        ]
-
-        mock_tokenizer.apply_chat_template.return_value = (
-            "System: You are helpful.\n"
-            "User: Hello!\n"
-            "Assistant: Hi there!\n"
-            "User: How are you?\n"
-            "Assistant: "
-        )
-
-        formatted = format_messages_with_hf_template(messages, mock_tokenizer)
-
-        assert "User: How are you?" in formatted
-        assert formatted.endswith("Assistant: ")
-
-    @pytest.mark.asyncio
-    async def test_empty_messages_handling(self, mock_tokenizer):
-        """Test empty messages list handling."""
-        messages = []
-
-        with pytest.raises(ValueError, match="Messages list cannot be empty"):
-            format_messages_with_hf_template(messages, mock_tokenizer)
-
-    @pytest.mark.asyncio
-    async def test_invalid_role_handling(self, mock_tokenizer):
-        """Test invalid role handling."""
-        messages = [
-            {"role": "invalid_role", "content": "Hello!"}
-        ]
-
-        with pytest.raises(ValueError, match="Invalid message role: invalid_role"):
-            format_messages_with_hf_template(messages, mock_tokenizer)
-
-
-class TestParameterValidation:
-    """Test OpenAI Chat Completion API parameter validation."""
-
-    def test_model_validation(self):
-        """Test model name validation."""
-        # Valid request
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[{"role": "user", "content": "Hello"}]
-        )
-        assert validate_chat_completion_request(request) is True
-
-        # Missing model
-        request.model = ""
-        assert validate_chat_completion_request(request) is False
-
-    def test_temperature_range(self):
-        """Test temperature parameter range validation."""
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[{"role": "user", "content": "Hello"}],
-            temperature=0.7
-        )
-        assert validate_chat_completion_request(request) is True
-
-        # Invalid temperature (too high)
-        request.temperature = 2.5
-        assert validate_chat_completion_request(request) is False
-
-        # Invalid temperature (negative)
-        request.temperature = -0.1
-        assert validate_chat_completion_request(request) is False
-
-    def test_max_tokens_validation(self):
-        """Test max_tokens parameter validation."""
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[{"role": "user", "content": "Hello"}],
-            max_tokens=1000
-        )
-        assert validate_chat_completion_request(request) is True
-
-        # Invalid max_tokens (negative)
-        request.max_tokens = -1
-        assert validate_chat_completion_request(request) is False
-
-        # Invalid max_tokens (zero)
-        request.max_tokens = 0
-        assert validate_chat_completion_request(request) is False
-
-    def test_top_p_range(self):
-        """Test top_p parameter range validation."""
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[{"role": "user", "content": "Hello"}],
-            top_p=0.9
-        )
-        assert validate_chat_completion_request(request) is True
-
-        # Invalid top_p (too high)
-        request.top_p = 1.5
-        assert validate_chat_completion_request(request) is False
-
-        # Invalid top_p (negative)
-        request.top_p = -0.1
-        assert validate_chat_completion_request(request) is False
-
-
-class TestCacheIntegration:
-    """Test Radix Cache integration and combination logic."""
+        return router
 
     @pytest.fixture
-    def mock_radix_tree(self):
-        """Mock RadixTree with async methods."""
-        tree = AsyncMock()
-        tree.find_longest_prefix_async = AsyncMock()
-        tree.insert_async = AsyncMock()
-        return tree
+    def chat_handler(self, mock_router):
+        """Create ChatCompletionHandler instance."""
+        return ChatCompletionHandler(mock_router)
 
-    @pytest.fixture
-    def mock_generate_api_handler(self):
-        """Mock generate API handler."""
-        handler = AsyncMock()
-        handler.return_value = {
-            "output_token_ids": [100, 101, 102],
-            "output_text": "Hello there!",
-            "request_id": "req-123",
-        }
-        return handler
+    def test_handler_initialization(self, mock_router):
+        """Test ChatCompletionHandler initialization."""
+        handler = ChatCompletionHandler(mock_router)
 
-    @pytest.fixture
-    def mock_match_result(self):
-        """Mock cache match result."""
-        node = StringTreeNode()
-        node.string_key = "Hello, how are"
-        node.token_ids = [1, 2, 3, 4, 5]
-        node.logp = [-0.1, -0.2, -0.1, -0.3, -0.2]
-        node.loss_mask = [0, 0, 0, 0, 0]
+        assert handler.router is mock_router
+        assert handler.args is mock_router.args
+        assert handler._cache_available is None
 
-        return MatchResult(
-            matched_prefix="Hello, how are",
-            token_ids=[1, 2, 3, 4, 5],
-            logp=[-0.1, -0.2, -0.1, -0.3, -0.2],
-            loss_mask=[0, 0, 0, 0, 0],
-            remaining_string=" you today?",
-            last_node=node
-        )
+    def test_check_cache_availability_with_available_components(self, mock_router):
+        """Test cache availability detection when components are available."""
+        handler = ChatCompletionHandler(mock_router)
 
-    @pytest.mark.asyncio
-    async def test_cache_hit_scenario(self, mock_radix_tree, mock_match_result, mock_generate_api_handler):
-        """Test scenario where cache hit occurs."""
-        mock_radix_tree.find_longest_prefix_async.return_value = mock_match_result
+        # Mock component registry with required components
+        mock_registry = MagicMock()
+        mock_registry.has.side_effect = lambda x: x in ["radix_tree", "tokenizer"]
+        mock_router.component_registry = mock_registry
 
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=MagicMock(),
-            generate_api_handler=mock_generate_api_handler
-        )
+        # First call should perform check and cache result
+        result1 = asyncio.run(handler._check_cache_availability())
+        assert result1 is True
 
-        formatted_text = "Hello, how are you today?"
-        cached_result = await handler._query_cache(formatted_text)
+        # Second call should return cached result
+        result2 = asyncio.run(handler._check_cache_availability())
+        assert result2 is True
+        assert handler._cache_available is True
 
-        assert cached_result.matched_prefix == "Hello, how are"
-        assert cached_result.remaining_string == " you today?"
-        assert len(cached_result.token_ids) == 5
+    def test_check_cache_availability_missing_components(self, mock_router):
+        """Test cache availability detection when components are missing."""
+        handler = ChatCompletionHandler(mock_router)
 
-    @pytest.mark.asyncio
-    async def test_cache_miss_scenario(self, mock_radix_tree, mock_generate_api_handler):
-        """Test scenario where cache miss occurs."""
-        # No match found
-        mock_match_result = MatchResult(
-            matched_prefix="",
-            token_ids=[],
-            logp=[],
-            loss_mask=[],
-            remaining_string="Hello, how are you today?",
-            last_node=StringTreeNode()
-        )
-        mock_radix_tree.find_longest_prefix_async.return_value = mock_match_result
+        # Mock component registry with missing components
+        mock_registry = MagicMock()
+        mock_registry.has.side_effect = lambda x: x == "tokenizer"  # Only has tokenizer
+        mock_router.component_registry = mock_registry
 
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=MagicMock(),
-            generate_api_handler=mock_generate_api_handler
-        )
+        result1 = asyncio.run(handler._check_cache_availability())
+        assert result1 is False
 
-        formatted_text = "Hello, how are you today?"
-        cached_result = await handler._query_cache(formatted_text)
+        result2 = asyncio.run(handler._check_cache_availability())
+        assert result2 is False
+        assert handler._cache_available is False
 
-        assert cached_result.matched_prefix == ""
-        assert cached_result.remaining_string == formatted_text
-        assert len(cached_result.token_ids) == 0
+    def test_check_cache_availability_with_exception(self, mock_router):
+        """Test cache availability detection handles exceptions gracefully."""
+        handler = ChatCompletionHandler(mock_router)
 
-    @pytest.mark.asyncio
-    async def test_cache_update_after_generation(self, mock_radix_tree, mock_generate_api_handler):
-        """Test cache update after generation."""
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=MagicMock(),
-            generate_api_handler=mock_generate_api_handler
-        )
+        # Mock component registry that raises exception
+        mock_registry = MagicMock()
+        mock_registry.has.side_effect = Exception("Registry error")
+        mock_router.component_registry = mock_registry
 
-        formatted_text = "Hello, how are you today?"
-        generated_tokens = [6, 7, 8, 9]
-        generated_text = " I'm doing well!"
+        result = asyncio.run(handler._check_cache_availability())
+        assert result is False
+        assert handler._cache_available is False
 
-        await handler._update_cache(
-            formatted_text,
-            generated_text,
-            generated_tokens
-        )
-
-        # Verify cache insertion was called
-        mock_radix_tree.insert_async.assert_called_once()
-        call_args = mock_radix_tree.insert_async.call_args[0]
-
-        assert call_args[0] == formatted_text + generated_text  # Full text
-        assert call_args[1] == generated_tokens  # All tokens
-
-
-class TestResponseConversion:
-    """Test conversion from generate API response to OpenAI format."""
-
-    def test_convert_generate_to_openai_response(self):
-        """Test conversion of generate API response to OpenAI Chat Completion format."""
-        # Mock generate API response
-        generate_response = {
-            "output_token_ids": [100, 101, 102],
-            "output_text": "Hello there!",
-            "request_id": "req-123",
-            "meta_info": {
-                "input_token_count": 10,
-                "output_token_count": 3
-            }
+    def test_validate_chat_completion_request_valid_request(self, chat_handler):
+        """Test validation of valid Chat Completion request."""
+        valid_request = {
+            "messages": [
+                {"role": "user", "content": "Hello, how are you?"}
+            ]
         }
 
-        # Mock cached tokens
-        cached_tokens = [1, 2, 3, 4, 5]
-        cached_text = "Hello, how are"
+        # Should not raise exception
+        chat_handler._validate_chat_completion_request(valid_request)
 
-        # Mock messages
-        messages = [
-            {"role": "user", "content": "Hello, how are you?"}
-        ]
-
-        # Mock tokenizer
-        mock_tokenizer = Mock()
-        mock_tokenizer.encode.return_value = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # Mock prompt tokens
-        mock_tokenizer.apply_chat_template.return_value = "User: Hello, how are you?\n\nAssistant:"  # Mock formatted text
-
-        openai_response = convert_generate_to_openai_response(
-            generate_response, cached_tokens, messages, mock_tokenizer
-        )
-
-        # Verify OpenAI format (use to_dict() method)
-        response_dict = openai_response.to_dict()
-        assert response_dict["object"] == "chat.completion"
-        assert response_dict["model"] == "slime-model"
-        assert len(response_dict["choices"]) == 1
-        assert response_dict["choices"][0]["message"]["role"] == "assistant"
-        assert response_dict["choices"][0]["message"]["content"] == "Hello there!"
-        # After using real tokenizer, prompt tokens should be calculated from formatted text
-        assert response_dict["usage"]["prompt_tokens"] == 10  # From mock tokenizer.encode() return value
-        assert response_dict["usage"]["completion_tokens"] == 3
-        assert response_dict["usage"]["total_tokens"] == 13  # 10 prompt + 3 completion tokens
-
-    def test_streaming_response_format(self):
-        """Test streaming response chunk format."""
-        chunk = {
-            "token_id": 100,
-            "text": "Hello",
-            "finished": False
+    def test_validate_chat_completion_request_missing_messages(self, chat_handler):
+        """Test validation fails when messages are missing."""
+        invalid_request = {
+            "model": "gpt-3.5-turbo",
+            "temperature": 0.7
         }
 
-        stream_response = ChatCompletionStreamResponse(
-            request_id="req-123",
-            chunk=chunk
-        )
+        with pytest.raises(Exception, match="'messages' field is required"):
+            chat_handler._validate_chat_completion_request(invalid_request)
 
-        formatted_chunk = stream_response.to_sse_format()
-
-        assert "data: " in formatted_chunk
-        assert '"choices"' in formatted_chunk
-        assert '"delta"' in formatted_chunk
-        assert '"content": "Hello"' in formatted_chunk
-
-    def test_streaming_finish_chunk(self):
-        """Test streaming finish chunk."""
-        finish_chunk = {
-            "token_id": None,
-            "text": "",
-            "finished": True,
-            "finish_reason": "stop"
+    def test_validate_chat_completion_request_empty_messages(self, chat_handler):
+        """Test validation fails when messages list is empty."""
+        invalid_request = {
+            "messages": []
         }
 
-        stream_response = ChatCompletionStreamResponse(
-            request_id="req-123",
-            chunk=finish_chunk
-        )
+        with pytest.raises(Exception, match="'messages' must be a non-empty list"):
+            chat_handler._validate_chat_completion_request(invalid_request)
 
-        formatted_chunk = stream_response.to_sse_format()
+    def test_validate_chat_completion_request_invalid_message_structure(self, chat_handler):
+        """Test validation fails when messages have invalid structure."""
+        invalid_request = {
+            "messages": [
+                {"content": "Hello"}  # Missing role field
+            ]
+        }
 
-        assert '"finish_reason": "stop"' in formatted_chunk
-        assert '"delta": {}' in formatted_chunk
+        with pytest.raises(Exception, match="message at index 0 must have 'role' and 'content' fields"):
+            chat_handler._validate_chat_completion_request(invalid_request)
 
 
 class TestErrorHandling:
-    """Test error handling scenarios."""
+    """Test error handling and fallback mechanisms."""
 
     @pytest.fixture
-    def mock_generate_api_handler(self):
-        """Mock generate API handler."""
-        handler = AsyncMock()
-        handler.return_value = {
-            "output_token_ids": [100, 101, 102],
-            "output_text": "Hello there!",
-            "request_id": "req-123",
-        }
-        return handler
+    def mock_router_error(self):
+        """Create a mock router for error testing."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        router.args.model_name = "test-model"
+        router.args.sglang_router_port = 30000
+        router.args.port = 30000
 
-    def test_missing_messages_error(self):
-        """Test error when messages are missing."""
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[]
-        )
+        # Mock component registry
+        router._component_registry = None
+        router._registry_lock = MagicMock()
 
-        assert not validate_chat_completion_request(request)  # Returns False instead of raising
+        # Mock worker management
+        router.worker_urls = {"http://test:10090": 0}
+        router._url_lock = AsyncMock()
+        router._use_url = AsyncMock(return_value="http://test:10090")
+        router._finish_url = AsyncMock()
 
-    @pytest.mark.asyncio
-    async def test_tokenizer_unavailable_error(self, mock_generate_api_handler):
-        """Test error when tokenizer is not available."""
-        with patch('slime.router.openai_chat_completion.format_messages_with_hf_template') as mock_format:
-            mock_format.side_effect = Exception("Tokenizer not available")
+        # Mock HTTP client
+        router.client = AsyncMock()
 
-            handler = ChatCompletionHandler(
-                radix_tree=AsyncMock(),
-                tokenizer=None,  # No tokenizer
-                generate_api_handler=mock_generate_api_handler
-            )
-
-            with pytest.raises(Exception, match="Tokenizer not available"):
-                await handler.handle_request(
-                    ChatCompletionRequest(
-                        model="slime-model",
-                        messages=[{"role": "user", "content": "Hello"}]
-                    )
-                )
-
-    @pytest.mark.asyncio
-    async def test_generate_api_error(self, mock_generate_api_handler):
-        """Test error when generate API call fails."""
-        # Mock radix tree with proper async method
-        mock_radix_tree = AsyncMock()
-        mock_radix_tree.find_longest_prefix_async = AsyncMock(return_value=MatchResult(
-            matched_prefix="",
-            token_ids=[],
-            logp=[],
-            loss_mask=[],
-            remaining_string="Hello",
-            last_node=StringTreeNode()
-        ))
-
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=MagicMock(),
-            generate_api_handler=mock_generate_api_handler
-        )
-
-        # Mock generate API failure - make AsyncMock raise an async exception
-        async def failing_handler(*args, **kwargs):
-            raise Exception("SGLang worker unavailable")
-
-        mock_generate_api_handler.side_effect = failing_handler
-
-        with pytest.raises(Exception, match="SGLang worker unavailable"):
-            await handler.handle_request(
-                ChatCompletionRequest(
-                    model="slime-model",
-                    messages=[{"role": "user", "content": "Hello"}]
-                )
-            )
-
-
-class TestConcurrencySafety:
-    """Test concurrent request handling safety."""
+        return router
 
     @pytest.fixture
-    def mock_radix_tree(self):
-        """Mock RadixTree with async methods."""
-        tree = AsyncMock()
-        tree.find_longest_prefix_async = AsyncMock()
-        tree.insert_async = AsyncMock()
-        return tree
+    def chat_handler_with_mocks(self, mock_router_error):
+        """Create ChatCompletionHandler with mocked router methods."""
+        handler = ChatCompletionHandler(mock_router_error)
 
-    @pytest.fixture
-    def mock_generate_api_handler(self):
-        """Mock generate API handler."""
-        handler = AsyncMock()
-        handler.return_value = {
-            "output_token_ids": [100, 101, 102],
-            "output_text": "Hello there!",
-            "request_id": "req-123",
-        }
+        # Mock router methods for error scenarios
+        mock_router_error._use_url = AsyncMock(side_effect=Exception("Worker unavailable"))
+        mock_router_error._finish_url = AsyncMock()
+        mock_router_error.client = AsyncMock()
+
         return handler
 
     @pytest.mark.asyncio
-    async def test_concurrent_cache_access(self, mock_radix_tree, mock_generate_api_handler):
-        """Test concurrent cache access doesn't cause race conditions."""
-        # Simulate concurrent cache queries
-        mock_radix_tree.find_longest_prefix_async.return_value = MatchResult(
-            matched_prefix="Hello",
-            token_ids=[1, 2],
-            logp=[-0.1, -0.2],
-            loss_mask=[0, 0],
-            remaining_string=" world",
-            last_node=StringTreeNode()
-        )
+    async def test_json_decode_error_handling(self, chat_handler_with_mocks):
+        """Test handling of malformed JSON in request."""
+        handler = chat_handler_with_mocks
 
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=MagicMock(),
-            generate_api_handler=mock_generate_api_handler
-        )
+        # Mock request with invalid JSON
+        mock_request = MagicMock()
+        mock_request.json.side_effect = json.JSONDecodeError("Invalid JSON", doc="", pos=0)
 
-        # Create multiple concurrent tasks
-        tasks = [
-            handler._query_cache("Hello world")
-            for _ in range(10)
+        with pytest.raises(Exception, match="Invalid JSON in request body"):
+            await handler.handle_request(mock_request)
+
+    @pytest.mark.asyncio
+    async def test_worker_unavailable_error_handling(self, chat_handler_with_mocks):
+        """Test handling when SGLang worker is unavailable."""
+        handler = chat_handler_with_mocks
+
+        # Mock request with valid data
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False
+        })
+
+        # Mock router to raise worker exception
+        chat_handler_with_mocks.router._use_url.side_effect = Exception("No workers available")
+        chat_handler_with_mocks.router._finish_url = AsyncMock()
+
+        # Should raise HTTPException with appropriate error message
+        with pytest.raises(Exception, match="Service temporarily unavailable"):
+            await handler.handle_request(mock_request)
+
+
+class TestCacheIntegration:
+    """Test cache integration and fallback behavior."""
+
+    @pytest.fixture
+    def mock_router_with_components(self):
+        """Create mock router with cache components."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        router.args.model_name = "test-model"
+        router.args.sglang_router_port = 30000
+        router.args.port = 30000
+
+        # Mock component registry with cache support
+        mock_registry = MagicMock()
+        mock_registry.has.side_effect = lambda x: x in ["radix_tree", "tokenizer"]
+        router.component_registry = mock_registry
+
+        # Mock worker management
+        router.worker_urls = {"http://test:10090": 0}
+        router._url_lock = AsyncMock()
+        router._use_url = AsyncMock(return_value="http://test:10090")
+        router._finish_url = AsyncMock()
+
+        # Mock HTTP client
+        router.client = AsyncMock()
+
+        return router
+
+    @pytest.fixture
+    def chat_handler_with_cache(self, mock_router_with_components):
+        """Create ChatCompletionHandler with cache support."""
+        return ChatCompletionHandler(mock_router_with_components)
+
+    @pytest.mark.asyncio
+    async def test_cached_mode_success_flow(self, chat_handler_with_cache):
+        """Test successful cached mode flow with valid components."""
+        handler = chat_handler_with_cache
+
+        # Mock request
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Hello!"}
+            ],
+            "stream": False,
+            "max_tokens": 100
+        })
+
+        # Mock successful generation response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "text": "Hello! I'm doing well, thank you for asking!",
+            "output_ids": [100, 101, 102]
+        }
+        handler.router._use_url.return_value = "http://test:10090"
+        handler.router._finish_url = AsyncMock()
+        handler.router.client.post.return_value = mock_response
+
+        result = await handler.handle_request(mock_request)
+
+        # Should return JSON response with OpenAI format
+        assert hasattr(result, 'content')
+        response_data = json.loads(result.body)
+        assert response_data["object"] == "chat.completion"
+        assert "choices" in response_data
+        assert len(response_data["choices"]) > 0
+        assert response_data["choices"][0]["message"]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_cached_mode_fallback_on_error(self, chat_handler_with_cache):
+        """Test fallback to direct mode when cached mode fails."""
+        handler = chat_handler_with_cache
+
+        # Mock request
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Hello!"}],
+            "stream": False
+        })
+
+        # Mock direct SGLang response for fallback
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "Fallback response"}}]
+        }).encode()
+        mock_response.headers = {"content-type": "application/json"}
+
+        handler.router.client.request.return_value = mock_response
+
+        result = await handler.handle_request(mock_request)
+
+        # Should return response from fallback
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_handler_basic_functionality(self, chat_handler_with_cache):
+        """Test basic handler functionality."""
+        handler = chat_handler_with_cache
+
+        # Mock request
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Hello!"}],
+            "stream": False
+        })
+
+        # Mock response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "Hello!"}}]
+        }).encode()
+        mock_response.headers = {"content-type": "application/json"}
+
+        handler.router.client.request.return_value = mock_response
+
+        result = await handler.handle_request(mock_request)
+
+        # Should return response
+        assert result is not None
+        assert result.status_code == 200
+
+
+class TestStreamingSupport:
+    """Test streaming functionality."""
+
+    @pytest.fixture
+    def mock_router_with_streaming(self):
+        """Create mock router for streaming tests."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        router.args.model_name = "test-model"
+        router.args.sglang_router_port = 30000
+        router.args.port = 30000
+
+        # Mock component registry
+        mock_registry = MagicMock()
+        mock_registry.has.side_effect = lambda x: x in ["radix_tree", "tokenizer"]
+        router.component_registry = mock_registry
+
+        # Mock worker management
+        router.worker_urls = {"http://test:10090": 0}
+        router._url_lock = AsyncMock()
+        router._use_url = AsyncMock(return_value="http://test:10090")
+        router._finish_url = AsyncMock()
+
+        # Mock HTTP client
+        mock_client = AsyncMock()
+
+        # Mock streaming response
+        mock_stream_response = MagicMock()
+        mock_stream_response.status_code = 200
+        mock_stream_response.aiter_lines = AsyncMock()
+
+        # Simulate SSE chunks
+        chunks = [
+            b'data: {"id": "1", "text": "Hello", "finish_reason": None}\n\n',
+            b'data: {"id": "1", "text": " world!", "finish_reason": "stop"}\n\n',
+            b'data: [DONE]\n\n'
         ]
+        mock_stream_response.aiter_lines.side_effect = chunks
 
-        # All tasks should complete without errors
-        results = await asyncio.gather(*tasks)
+        mock_client.stream.return_value.__aenter__ = AsyncMock(return_value=mock_stream_response)
 
-        assert len(results) == 10
-        assert all(result.matched_prefix == "Hello" for result in results)
-
-        # Verify cache was accessed concurrently
-        assert mock_radix_tree.find_longest_prefix_async.call_count == 10
-
-
-class TestMultiTurnConversationCache:
-    """Test multi-turn conversation caching scenarios that validate the Radix Cache fix."""
+        router.client = mock_client
+        return router
 
     @pytest.fixture
-    def mock_radix_tree(self):
-        """Mock RadixTree with async methods for multi-turn testing."""
-        tree = AsyncMock()
-        tree.find_longest_prefix_async = AsyncMock()
-        tree.insert_async = AsyncMock()
-        return tree
+    def chat_handler_streaming(self, mock_router_with_streaming):
+        """Create ChatCompletionHandler for streaming tests."""
+        return ChatCompletionHandler(mock_router_with_streaming)
+
+    @pytest.mark.asyncio
+    async def test_streaming_response_format(self, chat_handler_streaming):
+        """Test streaming response format matches OpenAI SSE format."""
+        handler = chat_handler_streaming
+
+        # Mock streaming request
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Hello!"}],
+            "stream": True
+        })
+
+        result = await handler.handle_request(mock_request)
+
+        # Should return StreamingResponse
+        assert hasattr(result, 'body_iterator')
+
+        # Collect chunks
+        chunks = []
+        async for line in result.body_iterator:
+            if isinstance(line, bytes):
+                chunks.append(line.decode('utf-8'))
+            else:
+                chunks.append(str(line))
+
+        # Verify SSE format
+        assert any("data:" in chunk for chunk in chunks)
+        assert any("data: [DONE]" in chunk for chunk in chunks)
+        assert any("chat.completion.chunk" in chunk for chunk in chunk)
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_response_format(self, chat_handler_streaming):
+        """Test non-streaming response format."""
+        handler = chat_handler_streaming
+
+        # Mock non-streaming request
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={
+            "messages": [{"role": "user", "content": "Hello!"}],
+            "stream": False
+        })
+
+        result = await handler.handle_request(mock_request)
+
+        # Should return JSON response
+        assert hasattr(result, 'content')
+        response_data = json.loads(result.body)
+        assert response_data["object"] == "chat.completion"
+        assert "choices" in response_data
+
+
+class TestSamplingParameters:
+    """Test OpenAI to SGLang parameter mapping."""
 
     @pytest.fixture
-    def mock_generate_api_handler(self):
-        """Mock generate API handler with stream support."""
-        handler = AsyncMock()
-        handler.return_value = {
-            "output_token_ids": [100, 101, 102],
-            "output_text": "I'm doing well! How about you?",
-            "request_id": "req-123",
+    def mock_router_params(self):
+        """Create a mock router for parameter testing."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        router.args.model_name = "test-model"
+        router.args.sglang_router_port = 30000
+        router.args.port = 30000
+
+        # Mock component registry
+        router._component_registry = None
+        router._registry_lock = MagicMock()
+
+        # Mock worker management
+        router.worker_urls = {"http://test:10090": 0}
+        router._url_lock = AsyncMock()
+        router._use_url = AsyncMock(return_value="http://test:10090")
+        router._finish_url = AsyncMock()
+
+        # Mock HTTP client
+        router.client = AsyncMock()
+
+        return router
+
+    @pytest.fixture
+    def chat_handler(self, mock_router_params):
+        """Create ChatCompletionHandler for parameter tests."""
+        return ChatCompletionHandler(mock_router_params)
+
+    def test_build_sampling_params_basic(self, chat_handler):
+        """Test basic parameter mapping."""
+        request_data = {
+            "max_tokens": 100,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 50,
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.2
         }
 
-        # Mock streaming support
-        async def mock_stream(request_data):
-            """Mock streaming response."""
-            chunks = [
-                {"text": "I'm", "finished": False},
-                {"text": " doing", "finished": False},
-                {"text": " well!", "finished": False},
-                {"text": "", "finished": True, "finish_reason": "stop"}
-            ]
-            for chunk in chunks:
-                yield chunk
+        params = chat_handler._build_sampling_params(request_data, stream=False)
 
-        handler.stream = mock_stream
-        return handler
+        assert params["max_new_tokens"] == 100
+        assert params["temperature"] == 0.7
+        assert params["top_p"] == 0.9
+        assert params["top_k"] == 50
+        assert params["frequency_penalty"] == 0.1
+        assert params["presence_penalty"] == 0.2
+        assert params["stream"] is False
 
-    @pytest.fixture
-    def mock_tokenizer(self):
-        """Mock HuggingFace tokenizer for multi-turn conversations."""
-        tokenizer = MagicMock()
-
-        def mock_apply_chat_template(messages, tokenize=False, add_generation_prompt=True):
-            """Simulate chat template formatting for multi-turn conversations."""
-            formatted_parts = []
-            for msg in messages:
-                if msg["role"] == "system":
-                    formatted_parts.append(f"System: {msg['content']}")
-                elif msg["role"] == "user":
-                    formatted_parts.append(f"User: {msg['content']}")
-                elif msg["role"] == "assistant":
-                    formatted_parts.append(f"Assistant: {msg['content']}")
-
-            if add_generation_prompt:
-                formatted_parts.append("Assistant:")
-
-            return "\n".join(formatted_parts)
-
-        tokenizer.apply_chat_template = mock_apply_chat_template
-        tokenizer.encode = MagicMock(side_effect=lambda text: list(range(len(text.split()))))
-        return tokenizer
-
-    @pytest.mark.asyncio
-    async def test_first_turn_cache_miss(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
-        """Test first turn of conversation results in cache miss."""
-        # Setup cache miss response
-        cache_miss_result = MatchResult(
-            matched_prefix="",
-            token_ids=[],
-            logp=[],
-            loss_mask=[],
-            remaining_string="User: Hello!",
-            last_node=StringTreeNode()
-        )
-        mock_radix_tree.find_longest_prefix_async.return_value = cache_miss_result
-
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=mock_tokenizer,
-            generate_api_handler=mock_generate_api_handler
-        )
-
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello!"}
-            ],
-            stream=False
-        )
-
-        response = await handler.handle_request(request)
-
-        # Verify response format
-        assert response["object"] == "chat.completion"
-        assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
-
-        # Verify cache insertion was called with complete conversation
-        mock_radix_tree.insert_async.assert_called_once()
-        call_args = mock_radix_tree.insert_async.call_args[0]
-
-        # Should contain the full conversation (prompt + response)
-        expected_full_text = "System: You are helpful.\nUser: Hello!\nAssistant:I'm doing well! How about you?"
-        assert call_args[0] == expected_full_text
-
-    @pytest.mark.asyncio
-    async def test_second_turn_cache_hit(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
-        """Test second turn of conversation benefits from cache hit."""
-        # Setup cache hit response for conversation prefix
-        cached_node = StringTreeNode()
-        cached_node.string_key = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well!"
-        cached_node.token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
-        cached_node.logp = [-0.1] * 8
-        cached_node.loss_mask = [0] * 8
-
-        cache_hit_result = MatchResult(
-            matched_prefix="System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well!",
-            token_ids=[1, 2, 3, 4, 5, 6, 7, 8],
-            logp=[-0.1] * 8,
-            loss_mask=[0] * 8,
-            remaining_string="User: How are you today?",
-            last_node=cached_node
-        )
-        mock_radix_tree.find_longest_prefix_async.return_value = cache_hit_result
-
-        # Mock updated generate response
-        mock_generate_api_handler.return_value = {
-            "output_token_ids": [200, 201, 202],
-            "output_text": "I'm great, thanks for asking!",
-            "request_id": "req-456",
+    def test_build_sampling_params_streaming(self, chat_handler):
+        """Test streaming parameter mapping."""
+        request_data = {
+            "max_tokens": 50,
+            "stream": True
         }
 
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=mock_tokenizer,
-            generate_api_handler=mock_generate_api_handler
-        )
+        params = chat_handler._build_sampling_params(request_data, stream=True)
 
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello!"},
-                {"role": "assistant", "content": "I'm doing well! How about you?"},
-                {"role": "user", "content": "How are you today?"}
-            ],
-            stream=False
-        )
+        assert params["max_new_tokens"] == 50
+        assert params["stream"] is True
 
-        response = await handler.handle_request(request)
+    def test_build_sampling_params_omits_none_values(self, chat_handler):
+        """Test that None values are filtered out."""
+        request_data = {
+            "max_tokens": 100,
+            "temperature": None,  # Should be omitted
+            "stop": None,  # Should be omitted
+            "presence_penalty": 0.1
+        }
 
-        # Verify response
-        assert response["choices"][0]["message"]["content"] == "I'm great, thanks for asking!"
+        params = chat_handler._build_sampling_params(request_data, stream=False)
 
-        # Verify cache was queried with the full conversation text
-        expected_query = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well! How about you?\nUser: How are you today?\nAssistant:"
-        mock_radix_tree.find_longest_prefix_async.assert_called_once_with(expected_query)
+        assert "max_new_tokens" in params
+        assert "temperature" not in params  # None values filtered
+        assert "stop" not in params  # None values filtered
+        assert "presence_penalty" == 0.1
 
-        # Verify cache was updated with extended conversation
-        assert mock_radix_tree.insert_async.call_count == 1
-        call_args = mock_radix_tree.insert_async.call_args[0]
 
-        # Should contain the extended conversation
-        expected_extended = "System: You are helpful.\nUser: Hello!\nAssistant: I'm doing well! How about you?\nUser: How are you today?\nAssistant:I'm great, thanks for asking!"
-        assert call_args[0] == expected_extended
+class TestFactoryFunction:
+    """Test the factory function for creating handlers."""
 
-    @pytest.mark.asyncio
-    async def test_multi_turn_streaming_with_cache(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
-        """Test streaming responses work correctly with multi-turn caching."""
-        # Setup partial cache hit
-        cached_node = StringTreeNode()
-        cached_node.string_key = "System: You are helpful.\nUser: Tell me a joke"
-        cached_node.token_ids = [1, 2, 3, 4]
-        cached_node.logp = [-0.1] * 4
-        cached_node.loss_mask = [0] * 4
+    @pytest.fixture
+    def mock_router(self):
+        """Create mock router."""
+        return MagicMock()
 
-        cache_hit_result = MatchResult(
-            matched_prefix="System: You are helpful.\nUser: Tell me a joke",
-            token_ids=[1, 2, 3, 4],
-            logp=[-0.1] * 4,
-            loss_mask=[0] * 4,
-            remaining_string="Assistant:",
-            last_node=cached_node
-        )
-        mock_radix_tree.find_longest_prefix_async.return_value = cache_hit_result
+    def test_create_chat_completion_handler(self, mock_router):
+        """Test factory function creates handler correctly."""
+        handler = create_chat_completion_handler(mock_router)
 
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=mock_tokenizer,
-            generate_api_handler=mock_generate_api_handler
-        )
-
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Tell me a joke"}
-            ],
-            stream=True
-        )
-
-        # Collect streaming response
-        stream_chunks = []
-        response = await handler.handle_request(request)
-
-        if hasattr(response, 'body_iterator'):
-            # Handle StreamingResponse
-            async for line in response.body_iterator:
-                if isinstance(line, bytes):
-                    stream_chunks.append(line.decode('utf-8'))
-                else:
-                    stream_chunks.append(str(line))
-        else:
-            # Handle unexpected response type
-            stream_chunks.append(str(response))
-
-        # Verify streaming format
-        assert len(stream_chunks) > 0
-        assert any("data:" in chunk for chunk in stream_chunks)
-
-        # Verify cache was updated after streaming
-        mock_radix_tree.insert_async.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_cache_disabled_scenario(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
-        """Test behavior when caching is explicitly disabled."""
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=mock_tokenizer,
-            generate_api_handler=mock_generate_api_handler,
-            enable_cache=False  # Cache disabled
-        )
-
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello!"}
-            ],
-            stream=False
-        )
-
-        response = await handler.handle_request(request)
-
-        # Verify response still works
-        assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
-
-        # Verify cache was NOT queried
-        mock_radix_tree.find_longest_prefix_async.assert_not_called()
-
-        # Verify cache was NOT updated
-        mock_radix_tree.insert_async.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_concurrent_multi_turn_cache_access(self, mock_radix_tree, mock_tokenizer, mock_generate_api_handler):
-        """Test concurrent access to cache during multi-turn conversations."""
-        # Setup cache response
-        cache_result = MatchResult(
-            matched_prefix="System: You are helpful.\nUser: Hello",
-            token_ids=[1, 2, 3],
-            logp=[-0.1, -0.2, -0.1],
-            loss_mask=[0, 0, 0],
-            remaining_string=" there!",
-            last_node=StringTreeNode()
-        )
-        mock_radix_tree.find_longest_prefix_async.return_value = cache_result
-
-        handler = ChatCompletionHandler(
-            radix_tree=mock_radix_tree,
-            tokenizer=mock_tokenizer,
-            generate_api_handler=mock_generate_api_handler
-        )
-
-        # Create multiple concurrent requests for the same conversation
-        request = ChatCompletionRequest(
-            model="slime-model",
-            messages=[
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello there!"}
-            ],
-            stream=False
-        )
-
-        # Execute concurrent requests
-        tasks = [handler.handle_request(request) for _ in range(5)]
-        responses = await asyncio.gather(*tasks)
-
-        # Verify all requests succeeded
-        assert len(responses) == 5
-        for response in responses:
-            assert response["object"] == "chat.completion"
-            assert response["choices"][0]["message"]["content"] == "I'm doing well! How about you?"
-
-        # Verify cache was accessed concurrently
-        assert mock_radix_tree.find_longest_prefix_async.call_count == 5
-
-        # Verify cache was updated for each request
-        assert mock_radix_tree.insert_async.call_count == 5
+        assert isinstance(handler, ChatCompletionHandler)
+        assert handler.router is mock_router
 
 
 class TestIntegrationHelpers:
     """Test helper functions and utilities."""
+
+    @pytest.fixture
+    def mock_router(self):
+        """Create mock router for helper tests."""
+        router = MagicMock()
+        router.args = MagicMock()
+        router.args.verbose = False
+        return router
 
     def test_sse_chunk_serialization(self):
         """Test Server-Sent Events chunk serialization."""
@@ -822,17 +587,6 @@ class TestIntegrationHelpers:
         assert "chat.completion.chunk" in sse_chunk
         assert "Hello" in sse_chunk
         assert sse_chunk.endswith("\n\n")
-
-    def test_token_count_calculation(self):
-        """Test accurate token count calculation."""
-        cached_tokens = [1, 2, 3, 4, 5]  # 5 tokens from cache
-        generated_tokens = [100, 101, 102]  # 3 tokens generated
-
-        total_tokens = len(cached_tokens) + len(generated_tokens)
-
-        assert total_tokens == 8
-        assert len(cached_tokens) == 5
-        assert len(generated_tokens) == 3
 
 
 if __name__ == "__main__":

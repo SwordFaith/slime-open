@@ -1,4 +1,18 @@
-"""Test async read-write lock implementation."""
+"""
+Unit tests for AsyncReadWriteLock implementation.
+
+Tests cover:
+- Basic read-write lock functionality
+- Concurrent read operations
+- Write operation exclusivity
+- Lock fairness and starvation prevention
+- Error handling and edge cases
+
+Test Strategy:
+- Unit tests with mocked dependencies
+- Focus on lock behavior under concurrent access
+- Verify thread safety and correctness
+"""
 import asyncio
 import time
 
