@@ -1,378 +1,193 @@
 # Slime Router 开发指南
 
-## 1. 开发环境搭建
+## 1. 快速开始
 
-### 1.1 Python 环境
+### 1.1 环境搭建
 
-**推荐配置**：
-- Python 3.10+
-- uv (快速依赖管理工具)
-- CPU-only torch (本地测试无需 GPU)
-
-**环境初始化**：
 ```bash
-# 创建虚拟环境
-uv venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
-
 # 安装开发依赖
 pip install -e ".[dev]"
-```
 
-### 1.2 依赖说明
-
-**核心依赖** (`requirements.txt`):
-```txt
-fastapi           # Router HTTP 服务
-httpx[http2]      # HTTP 客户端（支持 HTTP/2）
-transformers      # Tokenizer
-torch             # 基础依赖
-ray[default]      # 分布式计算
-tenacity          # 重试机制
-```
-
-**开发依赖** (`requirements-dev.txt`):
-```txt
-pytest            # 测试框架
-pytest-asyncio    # 异步测试支持
-pytest-mock       # Mock 工具
-pytest-cov        # 代码覆盖率
-pre-commit        # 代码质量检查
-black             # 代码格式化
-```
-
-### 1.3 测试框架配置
-
-**pyproject.toml 配置**：
-```toml
-[tool.pytest.ini_options]
-asyncio_mode = "auto"  # 自动识别 async 测试
-markers = [
-    "e2e: End-to-end tests (require server)",
-]
-```
-
-**运行测试**：
-```bash
-# 本地测试（无需 GPU）
+# 运行测试
 pytest tests/router/unit/ -v
-pytest tests/router/integration/ -v
+```
 
-# 跳过 E2E 测试
-pytest tests/ -m "not e2e" --cov=slime/router
+### 1.2 项目结构
 
-# E2E 测试（需服务器）
-pytest tests/ -m "e2e" -v
+```
+slime/router/
+├── router.py                     # FastAPI 路由服务
+├── openai_chat_completion.py     # OpenAI API 兼容层
+├── component_registry.py         # 组件依赖注入
+└── middleware_hub/               # 中间件插件系统
+    ├── radix_tree_middleware.py  # Radix Tree 缓存中间件
+    ├── radix_tree.py            # 前缀缓存数据结构
+    └── async_read_write_lock.py # 异步读写锁
+
+tests/router/
+├── unit/                        # 单元测试（快速，无依赖）
+├── integration/                 # 集成测试（Mock 外部依赖）
+└── e2e/                        # 端到端测试（需要真实服务）
 ```
 
 ---
 
-## 2. 添加新 Middleware
+## 2. 添加 Middleware
 
-### 2.1 接口规范
+### 2.1 基础模板
 
-**基类**：
 ```python
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
 
 class CustomMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, *, router):
-        """
-        Initialize middleware.
-
-        Args:
-            app: FastAPI application instance
-            router: SlimeRouter instance (provides access to args, workers, etc.)
-        """
         super().__init__(app)
         self.router = router
         self.args = router.args
 
     async def dispatch(self, request: Request, call_next):
-        """
-        Process request and response.
-
-        Args:
-            request: Incoming HTTP request
-            call_next: Callable to invoke next middleware/route handler
-
-        Returns:
-            Response: Modified or original response
-        """
-        # 1. Pre-processing (modify request)
-        modified_request = self.process_request(request)
-
-        # 2. Call downstream
-        response = await call_next(modified_request)
-
-        # 3. Post-processing (modify response)
-        modified_response = self.process_response(response)
-
-        return modified_response
+        # 预处理请求
+        # response = await call_next(request)
+        # 后处理响应
+        return response
 ```
 
-### 2.2 注册方式
+### 2.2 注册使用
 
-**命令行参数**：
 ```bash
 python -m slime.ray.rollout \
   --use-slime-router \
-  --slime-router-middleware-paths \
-    slime.router.middleware_hub.custom_middleware.CustomMiddleware \
-    slime.router.middleware_hub.another_middleware.AnotherMiddleware
+  --slime-router-middleware-paths slime.router.middleware_hub.custom_middleware.CustomMiddleware
 ```
 
-**加载顺序**：
-- Middleware 按注册顺序执行
-- 请求流: CustomMiddleware → AnotherMiddleware → Route Handler
-- 响应流: Route Handler → AnotherMiddleware → CustomMiddleware
-
-### 2.3 完整示例：日志 Middleware
+### 2.3 日志示例
 
 ```python
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """Log request/response metadata for debugging."""
-
     def __init__(self, app, *, router):
         super().__init__(app)
-        self.router = router
         self.verbose = getattr(router, "verbose", False)
 
     async def dispatch(self, request: Request, call_next):
-        # Record start time
         start_time = time.time()
-        path = request.url.path
-
-        # Log request
-        if self.verbose:
-            print(f"[LoggingMiddleware] Request: {request.method} {path}")
-
-        # Call downstream
         response = await call_next(request)
 
-        # Calculate latency
-        latency_ms = (time.time() - start_time) * 1000
-
-        # Log response
         if self.verbose:
-            print(f"[LoggingMiddleware] Response: {path} - {response.status_code} ({latency_ms:.2f}ms)")
-
-        # Add custom header
-        response.headers["X-Latency-Ms"] = str(latency_ms)
+            latency = (time.time() - start_time) * 1000
+            print(f"[{request.method}] {request.url.path} - {response.status_code} ({latency:.1f}ms)")
 
         return response
 ```
 
-**使用**：
-```bash
-python -m slime.ray.rollout \
-  --use-slime-router \
-  --slime-router-middleware-paths slime.router.middleware_hub.logging_middleware.LoggingMiddleware
-```
-
-### 2.4 高级示例：缓存失效 Middleware
-
-```python
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-
-class CacheInvalidationMiddleware(BaseHTTPMiddleware):
-    """Invalidate Radix Tree cache when weight version changes."""
-
-    def __init__(self, app, *, router):
-        super().__init__(app)
-        self.router = router
-        self.last_known_version = 0
-
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-
-        # Intercept /generate responses
-        if path == "/generate":
-            response = await call_next(request)
-
-            # Parse response to get weight_version
-            if hasattr(response, "body"):
-                import json
-                response_data = json.loads(response.body.decode("utf-8"))
-
-                current_version = response_data.get("meta_info", {}).get("weight_version", 0)
-
-                # Detect version change
-                if current_version > self.last_known_version:
-                    if self.verbose:
-                        print(f"[CacheInvalidation] Detected version change: {self.last_known_version} → {current_version}")
-
-                    # Trigger GC
-                    if hasattr(self.router, "radix_tree"):
-                        removed = self.router.radix_tree.gc_by_weight_version(
-                            current_version,
-                            gc_threshold_k=5
-                        )
-                        if self.verbose:
-                            print(f"[CacheInvalidation] GC removed {removed} entries")
-
-                    self.last_known_version = current_version
-
-            return response
-        else:
-            return await call_next(request)
-```
-
 ---
 
-## 3. 组件依赖注入架构 (2025-10-09)
+## 3. ComponentRegistry 组件管理
 
-### 3.1 ComponentRegistry 开发指南
+### 3.1 基本使用
 
-ComponentRegistry 是 Slime Router 的核心组件管理系统。详细的使用方法和概念介绍请参考 [用户指南](user-guide.md#componentregistry-架构)。
-
-#### 3.1.1 开发者最佳实践
-
-**自定义 Middleware 开发**：
 ```python
+# 在 Middleware 中注册组件
 class CustomMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, *, router):
         super().__init__(app)
         self.router = router
 
-        # 创建自定义组件
-        self.custom_cache = CustomCache(max_size=5000)
-        self.metrics_collector = MetricsCollector()
+        # 注册自定义组件
+        cache = CustomCache(max_size=5000)
+        router.component_registry.register("custom_cache", cache)
 
-        # 确保注册表存在
-        if not hasattr(router, 'component_registry'):
-            router.component_registry = ComponentRegistry()
-
-        # 注册组件
-        router.component_registry.register("custom_cache", self.custom_cache)
-        router.component_registry.register("metrics", self.metrics_collector)
+        # 获取已注册组件
+        tokenizer = router.component_registry.get("tokenizer")
+        radix_tree = router.component_registry.get("radix_tree")
 ```
 
-**错误处理模式**：
-```python
-def safe_get_component(router, name: str, fallback=None):
-    """Safely get a component with optional fallback."""
-    try:
-        if hasattr(router, 'component_registry'):
-            return router.component_registry.get(name)
-        else:
-            logger.warning("Component registry not initialized")
-            return fallback
-    except RuntimeError as e:
-        logger.warning(f"Component '{name}' not found: {e}")
-        return fallback
-```
+### 3.2 推荐命名
 
-### 3.2 迁移指南
-
-从硬编码到配置驱动的迁移方法和配置示例请参考 [用户指南](user-guide.md#componentregistry-架构)。
-
-**测试要点**：
-- 使用 mock 对象测试组件注册
-- 验证必需组件的存在性
-- 测试错误处理机制
-
-详细的迁移步骤和配置示例请参考用户指南的相关章节。
-
-### 3.3 最佳实践
-
-#### 3.3.1 组件命名规范
-
-**推荐命名**：
-- `tokenizer` - HuggingFace tokenizer 实例
-- `radix_tree` - Radix Tree 缓存实例
+- `tokenizer` - HuggingFace tokenizer
+- `radix_tree` - Radix Tree 缓存
 - `metrics` - 指标收集器
 - `cache` - 自定义缓存
 - `logger` - 日志记录器
-- `health_checker` - 健康检查器
 
-**避免命名**：
-- `tkn` - 过于简短的缩写
-- `tree` - 容易与其他 tree 混淆
-- `data` - 过于通用
-- `temp` - 临时组件应该明确用途
+### 3.3 错误处理
 
-#### 3.3.2 组件生命周期管理
-
-**初始化顺序**：
-1. 创建 ComponentRegistry 实例
-2. 按依赖顺序初始化组件
-3. 注册组件到注册表
-4. 验证所有必需组件已注册
-
-**清理资源**：
 ```python
-class CleanupMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, router):
-        super().__init__(app)
-        self.router = router
-
-        # 注册清理函数
-        import atexit
-        atexit.register(self.cleanup_resources)
-
-    def cleanup_resources(self):
-        """Cleanup registered components."""
-        if hasattr(self.router, 'component_registry'):
-            # 清理缓存
-            if self.router.component_registry.has("radix_tree"):
-                tree = self.router.component_registry.get("radix_tree")
-                tree.clear()
-
-            # 关闭连接
-            if self.router.component_registry.has("database"):
-                db = self.router.component_registry.get("database")
-                db.close()
+def safe_get_component(router, name: str, fallback=None):
+    try:
+        return router.component_registry.get(name)
+    except RuntimeError:
+        return fallback
 ```
 
 ---
 
-## 4. 测试策略
+## 4. 异步开发最佳实践
 
-### 4.1 分层测试架构
+### 4.1 异步编程模式
+
+**✅ 推荐模式**：
+
+```python
+# 正确用法 - 异步友好
+class GoodExample:
+    def __init__(self):
+        self._lock = AsyncReadWriteLock()
+        self._data = {}
+
+    async def get_data(self, key: str) -> Any:
+        async with self._lock.reader():
+            return self._data.get(key)
+```
+
+**❌ 错误模式**：
+
+```python
+# 错误用法 - 阻塞事件循环
+import time
+
+def blocking_operation():
+    time.sleep(1)  # 阻塞操作
+    return "result"
+```
+
+### 4.2 并发测试模式
+
+```python
+import pytest
+import asyncio
+
+@pytest.mark.asyncio
+async def test_concurrent_operations():
+    # 并发执行多个操作
+    tasks = [some_async_function(i) for i in range(10)]
+    results = await asyncio.gather(*tasks)
+    assert len(results) == 10
+```
+
+### 4.3 性能优化技巧
+
+1. **减少锁竞争** - 使用读写锁替代互斥锁
+2. **批量操作** - 合并多个小操作
+3. **内存优化** - 使用弱引用缓存，避免大对象复制
+
+---
+
+## 5. 测试策略
+
+### 5.1 分层测试架构
 
 **三层测试金字塔**：
+- **Unit Tests** - 纯数据结构逻辑，无外部依赖，极快 (<1s)，>90% 覆盖率
+- **Integration Tests** - Mock 外部依赖，Mock FastAPI/SGLang，快 (~10s)，>80% 覆盖率
+- **E2E Tests** - 完整服务测试，真实 SGLang server，慢 (~60s)，>60% 覆盖率
 
-```
-        E2E Tests (少量)
-       /               \
-      /   Integration   \
-     /      Tests        \
-    /    (中等数量)       \
-   /_______________________\
-  /                         \
- /       Unit Tests          \
-/       (大量,快速)           \
-\_____________________________/
-```
-
-**分层说明**：
-
-| 层级 | 特点 | 依赖 | 运行速度 | 覆盖率目标 |
-|-----|------|------|---------|----------|
-| **Unit Tests** | 纯数据结构逻辑 | 无外部依赖 | 极快 (<1s) | >90% |
-| **Integration Tests** | Mock 外部依赖 | Mock FastAPI, SGLang | 快 (~10s) | >80% |
-| **E2E Tests** | 完整服务测试 | 真实 SGLang server | 慢 (~60s) | >60% |
-
-### 4.2 Unit Tests
+### 5.2 Unit Tests
 
 **目录**: `tests/router/unit/`
 
-**特点**：
-- 测试 Radix Tree 核心逻辑
-- 无需网络、GPU、异步环境
-- 使用 Mock tokenizer
-
-**示例**：
 ```python
 import pytest
 from slime.router.middleware_hub.radix_tree import StringRadixTrie
@@ -403,23 +218,11 @@ def test_radix_tree_insert_and_query():
 pytest tests/router/unit/ -v
 ```
 
-### 4.3 Integration Tests
+### 5.3 Integration Tests
 
 **目录**: `tests/router/integration/`
 
-**特点**：
-- 测试 Middleware 与 Router 集成
-- Mock FastAPI Request/Response
-- Mock SGLang worker 响应
-- 使用真实 asyncio 环境
-
-**示例**：
 ```python
-import pytest
-from unittest.mock import AsyncMock
-from fastapi.testclient import TestClient
-from slime.router.middleware_hub.radix_tree_middleware import RadixTreeMiddleware
-
 @pytest.mark.asyncio
 async def test_middleware_cache_insertion(mocker):
     """Test middleware inserts generated tokens into cache."""
@@ -434,20 +237,13 @@ async def test_middleware_cache_insertion(mocker):
         "meta_info": {
             "finish_reason": {"type": "stop"},
             "weight_version": 10,
-            "output_token_logprobs": [
-                [-0.4, 4],
-                [-0.5, 5]
-            ]
+            "output_token_logprobs": [[-0.4, 4], [-0.5, 5]]
         }
     }
 
     mock_call_next = AsyncMock(return_value=create_response(sglang_response))
-
-    # Create middleware
     middleware = RadixTreeMiddleware(app, router=mock_router)
     middleware.tokenizer = mock_tokenizer
-
-    # Create request
     request = create_request({"text": "Hello"})
 
     # Dispatch
@@ -459,116 +255,17 @@ async def test_middleware_cache_insertion(mocker):
     assert result.loss_mask == [0, 0, 0, 1, 1]
 ```
 
-**运行**：
-```bash
-pytest tests/router/integration/ -v
-```
+### 5.4 TDD 工作流
 
-### 4.4 E2E Tests
-
-**目录**: `tests/router/e2e/`
-
-**特点**：
-- 真实 SGLang server
-- 真实 Router 服务
-- 完整 HTTP 请求流程
-
-**标记**：
-```python
-import pytest
-
-@pytest.mark.e2e
-async def test_full_generate_workflow():
-    """Test full generate workflow with real SGLang server."""
-    # Requires SGLang server running at localhost:10090
-    # ...
-```
-
-**运行**（需启动 SGLang server）：
-```bash
-# 启动 SGLang server (另一个终端)
-python -m sglang.launch_server --model-path /path/to/model --port 10090
-
-# 运行 E2E 测试
-pytest tests/router/e2e/ -m "e2e" -v
-```
-
-### 4.5 TDD 工作流
-
-**Test-Driven Development 变体流程**：
-
-```
+**Test-Driven Development 流程**：
 1. 写测试 (验证预期失败)
-   └─> pytest tests/test_new_feature.py -v
-       └─> ❌ FAIL (expected)
-
-2. 修复代码
-   └─> 实现功能逻辑
-
+2. 修复代码 (实现功能逻辑)
 3. 运行测试 (验证通过)
-   └─> pytest tests/test_new_feature.py -v
-       └─> ✅ PASS (9/9 tests)
+4. 重构代码 (优化实现,保持测试通过)
 
-4. 重构代码
-   └─> 优化实现,保持测试通过
-```
+### 5.5 异步性能测试
 
-**示例**（修复 Weight Version bug）：
-
-```bash
-# Step 1: 写测试
-cat > tests/router/unit/test_weight_version_fix.py <<EOF
-def test_traversed_nodes_update():
-    """Test: Traversed nodes update weight_version."""
-    tree = StringRadixTrie()
-    tree.insert("Hello", [1, 2], [-0.1, -0.2], [0, 0], weight_version=1)
-    tree.insert("Hello\nWorld", [1, 2, 3], [-0.1, -0.2, -0.3], [0, 0, 1], weight_version=5)
-
-    # ❌ Expected FAIL: "Hello" node should have weight_version=5
-    # (Before fix: weight_version=1)
-EOF
-
-# Step 2: 运行测试,验证失败
-pytest tests/router/unit/test_weight_version_fix.py -v
-# Output: FAILED (weight_version=1, expected 5)
-
-# Step 3: 修复代码
-# Edit slime/router/middleware_hub/radix_tree.py
-# (Add: for node in traversed_nodes: node.weight_version = weight_version)
-
-# Step 4: 再次运行测试,验证通过
-pytest tests/router/unit/test_weight_version_fix.py -v
-# Output: PASSED (1/1 tests)
-```
-
-### 4.6 异步性能测试
-
-#### 4.6.1 测试重要性
-
-在 asyncio 环境中，同步锁会阻塞事件循环，导致并发性能严重下降。异步性能测试用于验证：
-
-- 事件循环非阻塞特性
-- 并发读取性能提升
-- 系统整体吞吐量改善
-
-#### 4.6.2 测试方法论
-
-**并发读取测试**：
-- 创建相同数据的同步和异步版本
-- 并发执行多个读取操作
-- 对比响应时间和吞吐量
-
-**事件循环非阻塞验证**：
-- 运行后台计时任务
-- 执行异步缓存操作
-- 验证后台任务不被阻塞
-
-**正确性验证**：
-- 确保异步和同步结果一致
-- 验证并发安全性
-- 测试边界条件
-
-#### 4.6.3 关键性能指标
+**关键性能指标**：
 
 | 指标 | 同步 RLock | 异步 RWLock | 目标 |
 |------|------------|-------------|------|
@@ -576,54 +273,27 @@ pytest tests/router/unit/test_weight_version_fix.py -v
 | 系统吞吐量 | ~1K ops/s | ~100K ops/s | >100倍提升 |
 | 事件循环阻塞 | 是 | 否 | 完全消除 |
 
-#### 4.6.4 测试文件组织
-
-**性能测试文件**：
-- `test_performance_comparison.py` - 核心性能对比
-- `test_async_read_write_lock.py` - 锁机制性能
-- `test_radix_tree_async.py` - 异步接口性能
-- `test_radix_tree_middleware_async.py` - 集成性能
-
 **运行性能测试**：
 ```bash
-# 运行所有性能测试
 pytest tests/router/unit/test_performance_comparison.py -v -s
-
-# 运行特定性能测试
-pytest tests/router/unit/test_performance_comparison.py::TestPerformanceComparison::test_concurrent_read_performance -v -s
 ```
 
-详细的实现示例和测试结果请参考相关测试文件。
+### 5.6 测试覆盖率要求
 
-### 4.7 测试覆盖率要求
-
-**命令**：
 ```bash
 pytest tests/router/ -m "not e2e" --cov=slime/router --cov-report=term-missing
 ```
 
 **覆盖率目标**：
-- **修改的核心文件**: >80% 覆盖率
-- **新增功能**: 100% 覆盖率
-- **整体项目**: >70% 覆盖率
-
-**报告示例**：
-```
-Name                                          Stmts   Miss  Cover   Missing
----------------------------------------------------------------------------
-slime/router/router.py                          120      8    93%   45-47, 102
-slime/router/middleware_hub/radix_tree.py       350     15    96%   234-236, 456
-slime/router/middleware_hub/radix_tree_middleware.py  180      5    97%   112-114
-slime/router/middleware_hub/async_read_write_lock.py  150      0   100%
----------------------------------------------------------------------------
-TOTAL                                           800     28    96%
-```
+- 修改的核心文件: >80% 覆盖率
+- 新增功能: 100% 覆盖率
+- 整体项目: >70% 覆盖率
 
 ---
 
-## 4. 代码审查要点
+## 6. 代码审查要点
 
-### 4.1 关键检查项
+### 6.1 关键检查项
 
 **Async/Await 正确性**：
 - [ ] 所有 I/O 操作使用 `await`
@@ -634,7 +304,6 @@ TOTAL                                           800     28    96%
 - [ ] 避免使用 `threading.RLock` 等会阻塞事件循环的同步锁
 - [ ] 高频读取操作使用 `AsyncReadWriteLock` 支持并发读取
 - [ ] 包含异步性能测试验证优化效果
-- [ ] 验证事件循环不会被阻塞（使用后台任务测试）
 
 **并发安全**：
 - [ ] 共享状态（如 `worker_urls`）使用 `asyncio.Lock` 保护
@@ -654,9 +323,8 @@ TOTAL                                           800     28    96%
 - [ ] 新增功能有对应的单元测试
 - [ ] 测试覆盖率 >80%
 - [ ] 包含边界条件和异常场景的测试
-- [ ] 包含异步性能对比测试
 
-### 4.2 已知问题修复记录
+### 6.2 已知问题修复记录
 
 **Critical Issues（已修复）**：
 
@@ -665,27 +333,20 @@ TOTAL                                           800     28    96%
 | Async sleep blocking | P0 | Phase 3.1 | `sleep(30)` → `await asyncio.sleep(30)` |
 | Concurrency safety | P0 | Phase 3.2 | 添加 `asyncio.Lock` 保护 worker 选择 |
 | Weight version update | P0 | Phase 3.3 | 更新所有 traversed nodes 的 `weight_version` |
-| Tenacity retry 重构 | P1 | Phase 3.5 | 使用 `tenacity.AsyncRetrying` 替代手动循环 |
-| /metrics API | P1 | Phase 3.6 | 添加监控 API |
-| **RLock event loop blocking** | **P0** | **Phase 4.1** | **实现 `AsyncReadWriteLock` 替换 `threading.RLock`，性能提升 99.1%** |
+| **RLock event loop blocking** | **P0** | **Phase 4.1** | **实现 `AsyncReadWriteLock`，性能提升 99.1%** |
 
 **测试验证**：
 ```bash
-# 运行所有修复验证测试
 pytest tests/router/unit/test_radix_tree_core.py -v            # Weight version fix
-pytest tests/router/integration/test_router_concurrency.py -v  # Concurrency fix
-pytest tests/router/unit/test_tenacity_retry_logic.py -v       # Tenacity refactor
 pytest tests/router/unit/test_performance_comparison.py -v     # Async performance optimization
 pytest tests/router/unit/test_async_read_write_lock.py -v      # AsyncReadWriteLock tests
-pytest tests/router/unit/test_radix_tree_async.py -v           # RadixTree async interface tests
-pytest tests/router/unit/test_radix_tree_middleware_async.py -v # Middleware async tests
 ```
 
 ---
 
-## 5. 故障排查
+## 7. 故障排查
 
-### 5.1 缓存未命中
+### 7.1 缓存未命中
 
 **症状**: `/metrics` 显示 `hit_rate` 接近 0
 
@@ -699,25 +360,19 @@ pytest tests/router/unit/test_radix_tree_middleware_async.py -v # Middleware asy
 # 1. 检查缓存统计
 curl http://localhost:30000/metrics | jq '.cache'
 
-# 2. 检查 Radix Tree 状态
-# (In code: print(radix_tree.get_stats()))
-
-# 3. 检查 prompt 格式
-# 确保多轮对话的前缀一致
+# 2. 检查 prompt 格式，确保多轮对话的前缀一致
 ```
 
 **解决方案**：
 ```python
 # 标准化 prompt 格式
 def normalize_prompt(text):
-    # 统一换行符
-    text = text.replace('\r\n', '\n')
-    # 去除多余空格（根据需要）
-    text = ' '.join(text.split())
+    text = text.replace('\r\n', '\n')  # 统一换行符
+    text = ' '.join(text.split())      # 去除多余空格
     return text
 ```
 
-### 5.2 内存持续增长
+### 7.2 内存持续增长
 
 **症状**: Router 进程内存占用不断增长
 
@@ -731,10 +386,7 @@ def normalize_prompt(text):
 # 1. 检查当前缓存大小
 curl http://localhost:30000/metrics | jq '.cache.cur_cache_size'
 
-# 2. 检查 weight_version 是否传递
-# (需查看 SGLang response 格式)
-
-# 3. 监控内存占用
+# 2. 监控内存占用
 ps aux | grep "python.*router"
 ```
 
@@ -750,12 +402,12 @@ gc_threshold_k = 3  # 从 5 降低
 radix_tree.gc_by_weight_version(current_version, gc_threshold_k=3)
 ```
 
-### 5.3 负载不均衡
+### 7.3 负载不均衡
 
 **症状**: 某个 worker 负载远高于其他 workers
 
 **可能原因**：
-- 并发请求时的 race condition（已在 Phase 3.2 修复）
+- 并发请求时的 race condition（已修复）
 - Worker 性能差异（GPU 型号/内存不同）
 
 **排查步骤**：
@@ -781,7 +433,7 @@ git pull origin main
 curl -X POST "http://localhost:30000/remove_worker?url=http://worker3:10090"
 ```
 
-### 5.4 Async Sleep 阻塞
+### 7.4 Async Sleep 阻塞
 
 **症状**: 单个 abort 请求导致所有请求被阻塞 30 秒
 
@@ -794,7 +446,7 @@ grep -r "sleep(" slime/router/middleware_hub/
 # 应该只有 "asyncio.sleep"
 ```
 
-**修复**（已在 Phase 3.1 完成）：
+**修复**（已完成）：
 ```python
 # ❌ BEFORE
 from time import sleep
@@ -807,17 +459,13 @@ await asyncio.sleep(30)
 
 ---
 
-## 6. 贡献流程
+## 8. 贡献流程
 
-### 6.1 代码提交规范
+### 8.1 代码提交规范
 
 **Commit Message 格式**：
 ```
 <type>(<scope>): <subject>
-
-<body>
-
-<footer>
 ```
 
 **Type 类型**：
@@ -835,14 +483,10 @@ feat(router): add cache invalidation middleware
 Implement CacheInvalidationMiddleware to automatically
 trigger GC when weight_version changes.
 
-- Add weight_version change detection
-- Trigger gc_by_weight_version() on version update
-- Add tests in test_cache_invalidation.py
-
 Closes #123
 ```
 
-### 6.2 Pre-commit 检查
+### 8.2 Pre-commit 检查
 
 **安装 pre-commit hooks**：
 ```bash
@@ -859,23 +503,15 @@ pre-commit run --all-files
 - Black 代码格式化
 - isort import 排序
 - Flake8 代码规范
-- Mypy 类型检查（可选）
 
-### 6.3 Pull Request 流程
+### 8.3 Pull Request 流程
 
-**1. Fork 仓库**：
-```bash
-git clone https://github.com/YOUR_USERNAME/slime.git
-cd slime
-git remote add upstream https://github.com/THUDM/slime.git
-```
-
-**2. 创建 feature 分支**：
+**1. Fork 仓库并创建分支**：
 ```bash
 git checkout -b feat/my-new-feature
 ```
 
-**3. 编写代码 + 测试**：
+**2. 编写代码 + 测试**：
 ```bash
 # 编写代码
 vim slime/router/middleware_hub/my_middleware.py
@@ -887,46 +523,32 @@ vim tests/router/unit/test_my_middleware.py
 pytest tests/router/unit/test_my_middleware.py -v
 ```
 
-**4. 运行 pre-commit 检查**：
+**3. 运行 pre-commit 检查并提交**：
 ```bash
 pre-commit run --all-files
-```
-
-**5. 提交代码**：
-```bash
 git add .
 git commit -m "feat(router): add my new middleware"
-```
-
-**6. 推送到 GitHub**：
-```bash
 git push origin feat/my-new-feature
 ```
 
-**7. 创建 Pull Request**：
+**4. 创建 Pull Request**：
 - 访问 https://github.com/THUDM/slime/pulls
 - 点击 "New Pull Request"
-- 选择 `feat/my-new-feature` 分支
 - 填写 PR 描述（包括修改内容、测试结果、性能影响）
-
-**8. 代码审查**：
-- 等待 maintainer 审查
-- 根据反馈修改代码
-- 重新推送更新
 
 ---
 
-## 7. 相关资源
+## 9. 相关资源
 
 ### 内部文档
 - **架构设计**: [architecture.md](architecture.md)
-- **Radix Tree 详解**: [radix-tree.md](radix-tree.md)
 - **用户手册**: [user-guide.md](user-guide.md)
+- **测试指南**: [testing-guide.md](testing-guide.md)
+- **迁移指南**: [migration-guide.md](migration-guide.md)
 
 ### 外部资源
 - **FastAPI 文档**: https://fastapi.tiangolo.com/
 - **Starlette Middleware**: https://www.starlette.io/middleware/
-- **Tenacity 文档**: https://tenacity.readthedocs.io/
 - **pytest-asyncio**: https://pytest-asyncio.readthedocs.io/
 
 ### 代码位置
@@ -938,3 +560,30 @@ git push origin feat/my-new-feature
 ### 社区
 - **GitHub Issues**: https://github.com/THUDM/slime/issues
 - **Discussions**: https://github.com/THUDM/slime/discussions
+
+---
+
+## 10. 总结
+
+### 10.1 核心原则
+
+1. **异步优先**: 使用 FastAPI 和异步编程模式
+2. **组件化**: 通过 ComponentRegistry 实现松耦合
+3. **中间件模式**: 通过中间件扩展功能
+4. **线程安全**: 正确处理并发访问
+
+### 10.2 最佳实践
+
+1. **错误处理**: 完整的异常处理和恢复机制
+2. **性能优化**: 缓存、批量操作、内存管理
+3. **监控告警**: 全面的指标监控和告警
+4. **安全防护**: 认证授权、输入验证、防护措施
+
+### 10.3 运维考虑
+
+1. **部署架构**: 容器化、负载均衡、高可用
+2. **故障排查**: 系统化的诊断和恢复流程
+3. **日志管理**: 结构化日志和分析
+4. **自动化**: 自动恢复和运维工具
+
+通过遵循这些原则和实践，可以构建高质量、高可靠的 Slime Router 系统。
