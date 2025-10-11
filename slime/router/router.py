@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 
 from slime.router.component_registry import ComponentRegistry
-from slime.utils.misc import load_function
 from slime.router.middleware_hub.radix_tree_middleware import _filter_headers
+from slime.utils.misc import load_function
 
 
 def run_router(args):
@@ -37,6 +37,10 @@ class SlimeRouter:
         self._component_registry = None
         self._registry_lock = threading.Lock()
 
+        # Cache availability check result (None = not checked yet)
+        self._cache_available = None
+        self._cache_lock = threading.Lock()  # Separate lock for cache availability
+
         # Worker information
         self.worker_urls: dict[str, int] = {}
         self.max_weight_version = None
@@ -44,7 +48,7 @@ class SlimeRouter:
         # Concurrency control for worker URL selection
         self._url_lock = asyncio.Lock()
 
-        # TODO: remove this hardcode
+        # HTTP client configuration with proper args-based parameters
         self.client = httpx.AsyncClient(
             limits=httpx.Limits(
                 max_connections=args.sglang_server_concurrency
@@ -396,6 +400,43 @@ class SlimeRouter:
             self.worker_urls[url] -= 1
             assert self.worker_urls[url] >= 0, f"URL {url} count went negative"
 
+    def _check_cache_availability(self):
+        """
+        Check if cache support is available by testing component registry.
+
+        Returns:
+            bool: True if cache is available, False otherwise
+        """
+        # Use cache lock to ensure thread-safe initialization
+        if self._cache_available is None:
+            with self._cache_lock:
+            # Double-check pattern: another thread might have set the result while we waited for the lock
+                try:
+                    # Get component registry safely (this uses its own lock)
+                    registry = self.get_component_registry()
+
+                    # Check if router has the required components
+                    if (registry.has("radix_tree") and registry.has("tokenizer")):
+
+                        # Cache and return result (under cache lock)
+                        self._cache_available = True
+                        if self.verbose:
+                            print(f"[slime-router] Cache available through component registry")
+                        return self._cache_available
+                    else:
+                        # Cache and return result (under cache lock)
+                        self._cache_available = False
+                        if self.verbose:
+                            print(f"[slime-router] Cache not available: missing components")
+                        return self._cache_available
+                except Exception as e:
+                    # Cache and return result (under cache lock)
+                    self._cache_available = False
+                    if self.verbose:
+                        print(f"[slime-router] Cache availability check error: {e}")
+
+        return self._cache_available
+
     async def chat_completions(self, request: Request):
         """
         OpenAI Chat Completion API endpoint.
@@ -406,20 +447,9 @@ class SlimeRouter:
         # Lazy import to avoid circular dependency
         from slime.router.openai_chat_completion import create_chat_completion_handler
 
-        # Determine cache configuration
-        cache_enabled = (
-            getattr(self.args, 'enable_chat_completion_cache', True) and
-            not getattr(self.args, 'disable_radix_cache_for_chat', False)
-        )
-
-        # Initialize handler on first use with cache configuration
+        # Initialize handler on first use with dynamic cache availability
         if not hasattr(self, '_chat_completion_handler'):
-            self._chat_completion_handler = create_chat_completion_handler(
-                self._get_radix_tree(),
-                self._get_tokenizer(),
-                self._create_generate_handler(),
-                enable_cache=cache_enabled
-            )
+            self._chat_completion_handler = create_chat_completion_handler(self)
 
         # Handle request
         import json
@@ -486,11 +516,13 @@ class SlimeRouter:
             Internal generate handler that calls router's own /generate endpoint
             to ensure RadixTreeMiddleware processes the request.
             """
-            # Check if chat completion cache is disabled
-            cache_disabled = getattr(self.args, 'disable_radix_cache_for_chat', False)
+            # Check cache availability dynamically
+            cache_available = self._check_cache_availability()
 
-            if cache_disabled:
-                # Fallback to direct SGLang worker if cache is explicitly disabled
+            if not cache_available:
+                # Fallback to direct SGLang worker if cache is not available
+                if self.verbose:
+                    print(f"[slime-router] Cache not available, using direct SGLang worker")
                 worker_url = await self._use_url()
                 try:
                     response = await self.client.post(
@@ -503,6 +535,8 @@ class SlimeRouter:
                     await self._finish_url(worker_url)
             else:
                 # Use router's own /generate endpoint to benefit from Radix Cache
+                if self.verbose:
+                    print(f"[slime-router] Using cache-enabled generate endpoint")
                 try:
                     # Call our own /generate endpoint which will be processed by RadixTreeMiddleware
                     port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
@@ -535,10 +569,13 @@ class SlimeRouter:
             """
             Streaming handler that calls router's own /generate endpoint with streaming.
             """
-            cache_disabled = getattr(self.args, 'disable_radix_cache_for_chat', False)
+            # Check cache availability dynamically
+            cache_available = self._check_cache_availability()
 
-            if cache_disabled:
+            if not cache_available:
                 # Direct streaming to SGLang worker
+                if self.verbose:
+                    print(f"[slime-router] Cache not available, using direct SGLang streaming")
                 worker_url = await self._use_url()
                 try:
                     async with self.client.stream(
@@ -563,6 +600,8 @@ class SlimeRouter:
                     await self._finish_url(worker_url)
             else:
                 # Use router's own streaming endpoint
+                if self.verbose:
+                    print(f"[slime-router] Using cache-enabled streaming endpoint")
                 try:
                     # Use compatibility parameters if available, otherwise use main parameters
                     port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
@@ -624,60 +663,84 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Slime Router - Token-based inference router with Radix Cache optimization")
-    
-    # Server configuration
-    parser.add_argument("--host", type=str, default="0.0.0.0", 
-                       help="Host address to bind the router server (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=30000,
-                       help="Port to bind the router server (default: 30000)")
-    
+
     # SGLang backend configuration
     parser.add_argument("--sglang-host", type=str, required=True,
                        help="SGLang server host address")
     parser.add_argument("--sglang-port", type=int, required=True,
                        help="SGLang server port")
 
-    # Compatibility aliases
+    # SGLang router configuration
     parser.add_argument("--sglang-router-ip", type=str, default="0.0.0.0",
                        help="Alias for --host for backward compatibility")
     parser.add_argument("--sglang-router-port", type=int, default=30000,
                        help="Alias for --port for backward compatibility")
-    
+
     # Tokenizer configuration
-    parser.add_argument("--hf-checkpoint", type=str, 
+    parser.add_argument("--hf-checkpoint", type=str,
                        help="HuggingFace model checkpoint for tokenizer")
-    
-    # Radix Tree configuration
-    parser.add_argument("--radix-tree-max-size", type=int, default=10000,
-                       help="Maximum cache size for RadixTree (default: 10000)")
-    
-    # API configuration
-    parser.add_argument("--enable-openai-chat-completion", action="store_true", default=False,
-                       help="Enable OpenAI-compatible Chat Completion API endpoint")
 
-    # Chat Completion cache configuration
-    parser.add_argument("--enable-chat-completion-cache", action="store_true", default=True,
-                       help="Enable Radix Cache for Chat Completion API (default: True)")
-    parser.add_argument("--disable-radix-cache-for-chat", action="store_true", default=False,
-                       help="Disable Radix Cache for Chat Completion API (overrides --enable-chat-completion-cache)")
+    # Router-specific arguments
+    parser.add_argument(
+            "--slime-router-middleware-paths",
+            type=str,
+            nargs="+",
+            default="",
+        )
+    parser.add_argument(
+        "--enable-openai-chat-completion",
+        action="store_true",
+        default=False,
+        help="Enable OpenAI-compatible Chat Completion API endpoint",
+    )
+    parser.add_argument(
+        "--radix-tree-max-size",
+        type=int,
+        default=10000,
+        help="Maximum cache size for RadixTree (default: 10000)",
+    )
 
-    # Middleware configuration
-    parser.add_argument("--slime-router-middleware-paths", type=str, nargs='*', default=None,
-                       help="List of middleware paths to load for the router")
+    # HTTP Client configuration for SGLang workers
+    parser.add_argument(
+        "--sglang-server-concurrency",
+        type=int,
+        default=128,
+        help="Maximum number of concurrent requests to SGLang server (default: 128)",
+    )
+    parser.add_argument(
+        "--rollout-num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs for inference (default: 1)",
+    )
+    parser.add_argument(
+        "--rollout-num-gpus-per-engine",
+        type=int,
+        default=1,
+        help="Number of GPUs per inference engine (default: 1)",
+    )
 
-    # SGLang worker configuration (needed for load calculation)
-    parser.add_argument("--sglang-server-concurrency", type=int, default=128,
-                       help="SGLang server concurrency limit")
-    parser.add_argument("--rollout-num-gpus", type=int, default=1,
-                       help="Number of GPUs for rollout")
-    parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1,
-                       help="Number of GPUs per SGLang engine")
-
-    # General configuration
-    parser.add_argument("--verbose", action="store_true",
-                       help="Enable verbose output")
+    # Logging configuration
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
     args = parser.parse_args()
+
+    # Validate arguments
+    if args.sglang_server_concurrency <= 0:
+        print("Error: --sglang-server-concurrency must be positive")
+        exit(1)
+
+    if args.rollout_num_gpus <= 0:
+        print("Error: --rollout-num-gpus must be positive")
+        exit(1)
+
+    if args.rollout_num_gpus_per_engine <= 0:
+        print("Error: --rollout-num-gpus-per-engine must be positive")
+        exit(1)
+
+    if args.rollout_num_gpus % args.rollout_num_gpus_per_engine != 0:
+        print("Error: --rollout-num-gpus must be divisible by --rollout-num-gpus-per-engine")
+        exit(1)
 
     # Run the router
     run_router(args)
