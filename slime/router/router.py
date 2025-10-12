@@ -9,8 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 
-from slime.router.component_registry import ComponentRegistry
-from slime.router.middleware_hub.radix_tree_middleware import _filter_headers
+from slime.router.utils.component_registry import ComponentRegistry
+from slime.router.middleware.radix_tree_middleware import _filter_headers
 from slime.utils.misc import load_function
 
 
@@ -445,7 +445,7 @@ class SlimeRouter:
         Slime Router's token-based inference with Radix Cache optimization.
         """
         # Lazy import to avoid circular dependency
-        from slime.router.openai_chat_completion import create_chat_completion_handler
+        from slime.router.handlers.openai_chat_completion import create_chat_completion_handler
 
         # Initialize handler on first use with dynamic cache availability
         if not hasattr(self, '_chat_completion_handler'):
@@ -456,7 +456,7 @@ class SlimeRouter:
         body = await request.body()
         data = json.loads(body) if body else {}
 
-        from slime.router.openai_chat_completion import ChatCompletionRequest
+        from slime.router.handlers.openai_chat_completion import ChatCompletionRequest
         chat_request = ChatCompletionRequest(**data)
 
         return await self._chat_completion_handler.handle_request(chat_request)

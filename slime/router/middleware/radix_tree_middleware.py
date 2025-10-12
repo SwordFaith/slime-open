@@ -8,9 +8,9 @@ from starlette.responses import Response
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
 
-from slime.router.component_registry import ComponentRegistry
+from slime.router.utils.component_registry import ComponentRegistry
 
-from .radix_tree import StringRadixTrie
+from slime.router.core.radix_tree import StringRadixTrie
 
 
 def _is_response_aborted(response_data: dict) -> bool:

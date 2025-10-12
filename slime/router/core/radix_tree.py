@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .async_read_write_lock import AsyncReadWriteLock, read_lock, write_lock
+from slime.router.utils.async_read_write_lock import AsyncReadWriteLock, read_lock, write_lock
 
 
 @dataclass
