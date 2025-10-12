@@ -56,4 +56,5 @@ markers = [
     "pleasefixme: marks tests that are broken and need fixing",
     "e2e: marks tests requiring remote SGLang server with GPU (deselect with '-m \"not e2e\"')",
     "asyncio: marks async tests",
+    "performance: marks performance benchmark tests (may be slow)",
 ]
