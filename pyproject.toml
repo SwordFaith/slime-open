@@ -55,4 +55,5 @@ markers = [
     "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
     "e2e: marks tests requiring remote SGLang server with GPU (deselect with '-m \"not e2e\"')",
+    "asyncio: marks async tests",
 ]
