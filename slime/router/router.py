@@ -246,9 +246,8 @@ class SlimeRouter:
             # No radix tree available, skip cache metrics
             return JSONResponse(content=metrics)
 
-        # Phase 1 TODO: migrate to async get_stats() when radix_tree is fully async
-        # For now, use sync version but this blocks the event loop briefly
-        cache_stats = radix_tree.get_stats()
+        # Use async get_stats() for better concurrency and performance
+        cache_stats = await radix_tree.get_stats_async()
         # Estimate memory usage (16 bytes per token ID)
         cache_stats["cache_size_mb"] = (
             cache_stats["cur_cache_size"] * 16 / 1024 / 1024
@@ -274,8 +273,8 @@ class SlimeRouter:
                 "Radix tree not available. Please ensure RadixTreeMiddleware is properly initialized."
             )
 
-        # Use radix tree's retrieve_from_text method (no need to fetch weight version here)
-        token_ids, logp, loss_mask = radix_tree.retrieve_from_text(text, return_logprob=True)
+        # Use radix tree's get_or_create_tokenization_async method for better performance
+        token_ids, logp, loss_mask, generation_versions = await radix_tree.get_or_create_tokenization_async(text, return_logprob=True)
 
         # Handle the result based on whether logp was requested
         result = {
@@ -285,6 +284,7 @@ class SlimeRouter:
             "token_length": len(token_ids),
             "loss_mask_length": len(loss_mask),
             "rollout_logp": logp,
+            "generation_versions": generation_versions,  # Added for consistency with other endpoints
         }
 
         # # Add logp to response if requested

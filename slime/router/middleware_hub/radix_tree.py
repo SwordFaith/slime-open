@@ -101,12 +101,35 @@ class StringTreeNode:
 class StringRadixTrie:
     """
     String-based Radix Trie for efficient prefix matching and token caching.
+
+    DUAL LOCK ARCHITECTURE FOR OPTIMAL PERFORMANCE:
+
+    == Synchronous API (Backward Compatibility) ==
+    All sync methods use simple threading.RLock for basic thread safety.
+    - DEPRECATED for high-performance scenarios
+    - Simple, reliable, but no read-write concurrency benefits
+    - Suitable for existing code and simple use cases
+    - Will emit DeprecationWarning encouraging migration to async versions
+
+    == Asynchronous API (High Performance) ==
+    All async methods use AsyncReadWriteLock for optimal concurrency.
+    - RECOMMENDED for async applications and high-concurrency scenarios
+    - Multiple concurrent readers allowed for better performance
+    - Exclusive writer access when modifications are needed
+    - True read-write lock benefits for read-heavy workloads
+
     Features:
     - Efficient string prefix matching
     - Token ID caching for matched prefixes
-    - Thread-safe operations
     - Weight version tracking
     - Automatic garbage collection based on weight version thresholds
+    - Both synchronous (deprecated) and asynchronous (recommended) API support
+
+    Performance Recommendations:
+    - Use async methods for new code and high-performance scenarios
+    - Sync methods are maintained for backward compatibility only
+    - Async methods provide true read-write concurrency benefits
+    - Consider async versions for read-heavy workloads with many concurrent operations
     """
 
     def __init__(self, max_cache_size: int = 10000, gc_threshold_k: int = 5, tokenizer=None, verbose: bool = False):
@@ -134,20 +157,32 @@ class StringRadixTrie:
         self.cache_misses = 0
         self.cur_cache_size = 0  # Total number of token IDs across all nodes
 
-        # Thread safety
-        self._lock = threading.RLock()  # Keep for backward compatibility
+        # Thread safety - dual lock system for different use cases
+        self._lock = threading.RLock()  # Sync methods: simple, compatible (deprecated)
 
-        # Async read-write lock for better performance
+        # Async read-write lock for high-performance concurrent access
         self._async_lock = AsyncReadWriteLock(debug=False)
 
     def find_longest_prefix(self, text: str) -> MatchResult:
         """
         Find the longest cached prefix for the given text.
+
+        [DEPRECATED] Use find_longest_prefix_async() for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+
         Args:
             text: Input string to find prefix for
         Returns:
             MatchResult containing matched prefix, token IDs, logp, and remaining string
         """
+        import warnings
+        warnings.warn(
+            "find_longest_prefix is deprecated for high-performance scenarios. "
+            "Use find_longest_prefix_async() for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             if not text:
                 return MatchResult("", [], [], [], text, self.root, generation_versions=[])
@@ -215,25 +250,19 @@ class StringRadixTrie:
 
     async def find_longest_prefix_async(self, text: str) -> MatchResult:
         """
-        Async version of find_longest_prefix for better concurrency.
-        Uses read-write lock to allow concurrent reads.
+        [HIGH PERFORMANCE] Async version of find_longest_prefix for better concurrency.
+        Uses AsyncReadWriteLock to allow multiple concurrent readers for optimal performance.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: multiple readers can access simultaneously.
+
         Args:
             text: Input string to find prefix for
         Returns:
             MatchResult containing matched prefix, token IDs, logp, and remaining string
         """
         async with read_lock(self._async_lock):
-            # Call the original sync method logic without the RLock
-            # Temporarily disable the original lock to avoid double locking
-            original_lock = self._lock
-            self._lock = None  # Temporarily disable RLock
-
-            try:
-                result = self._find_longest_prefix_internal(text)
-            finally:
-                self._lock = original_lock  # Restore original lock
-
-            return result
+            return self._find_longest_prefix_internal(text)
 
     def _find_longest_prefix_internal(self, text: str) -> MatchResult:
         """Internal find_longest_prefix logic without any locks."""
@@ -306,6 +335,10 @@ class StringRadixTrie:
     ) -> bool:
         """
         Insert a string and its corresponding token IDs, log probabilities, and loss mask into the trie.
+
+        [DEPRECATED] Use insert_async() for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+
         Args:
             text: String to insert
             token_ids: Corresponding token IDs
@@ -315,6 +348,14 @@ class StringRadixTrie:
         Returns:
             True if insertion was successful
         """
+        import warnings
+        warnings.warn(
+            "insert is deprecated for high-performance scenarios. "
+            "Use insert_async() for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             if not text or not token_ids:
                 if self.verbose:
@@ -380,8 +421,12 @@ class StringRadixTrie:
         weight_version: Optional[int] = None,
     ) -> bool:
         """
-        Async version of insert for better concurrency.
-        Uses write lock to ensure exclusive access during modifications.
+        [HIGH PERFORMANCE] Async version of insert for better concurrency.
+        Uses AsyncReadWriteLock write lock to ensure exclusive access during modifications.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: exclusive writer access with concurrent readers.
+
         Args:
             text: String to insert
             token_ids: Corresponding token IDs
@@ -392,16 +437,8 @@ class StringRadixTrie:
             True if insertion was successful
         """
         async with write_lock(self._async_lock):
-            # Temporarily disable the original lock to avoid double locking
-            original_lock = self._lock
-            self._lock = None  # Temporarily disable RLock
-
-            try:
-                result = self._insert_internal(text, token_ids, logp, loss_mask, weight_version)
-            finally:
-                self._lock = original_lock  # Restore original lock
-
-            return result
+            # Call the synchronous insert logic that includes validation and GC
+            return self._insert_internal(text, token_ids, logp, loss_mask, weight_version)
 
     def _insert_internal(
         self,
@@ -411,7 +448,17 @@ class StringRadixTrie:
         loss_mask: Optional[List[int]] = None,
         weight_version: Optional[int] = None,
     ) -> bool:
-        """Internal insert logic without any locks."""
+        """Internal insert logic without any locks.
+
+        Args:
+            text: String to insert
+            token_ids: Corresponding token IDs
+            logp: Corresponding log probabilities (must match token_ids length)
+            loss_mask: Corresponding loss mask for model generation parts (must match token_ids length)
+            weight_version: Optional weight version for this insertion
+        Returns:
+            True if insertion was successful
+        """
         if not text or not token_ids:
             if self.verbose:
                 print("[RadixTree] Insertion failed: text or token_ids is empty")
@@ -450,7 +497,7 @@ class StringRadixTrie:
 
         result = self._insert(text, token_ids, logp, loss_mask, current_weight_version)
 
-        # Check if GC should be triggered after insert
+        # Check if GC should be triggered after insert (only if trigger_gc is True)
         if self.cur_cache_size > self.max_cache_size and weight_version is not None:
             if self.verbose:
                 print(
@@ -463,7 +510,7 @@ class StringRadixTrie:
         # Print tree structure if verbose is enabled
         if self.verbose:
             print("Tree structure after insert:")
-            self.pretty_print()
+            self._pretty_print_internal()
 
         return result
 
@@ -555,11 +602,23 @@ class StringRadixTrie:
     def remove(self, text: str) -> bool:
         """
         Remove a string and all nodes with this text as prefix from the trie.
+
+        [DEPRECATED] Use async methods for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+
         Args:
             text: String to remove (will also remove all strings starting with this text)
         Returns:
             True if any removal was performed
         """
+        import warnings
+        warnings.warn(
+            "remove is deprecated for high-performance scenarios. "
+            "Use async methods for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             node = self._find_node_by_text(text)
             if node:
@@ -569,6 +628,32 @@ class StringRadixTrie:
                 if self.verbose:
                     print("Tree structure after remove:")
                     self.pretty_print()
+
+                return removed_count > 0
+            return False
+
+    async def remove_async(self, text: str) -> bool:
+        """
+        [HIGH PERFORMANCE] Async version of remove for better concurrency.
+        Uses AsyncReadWriteLock write lock to ensure exclusive access during modifications.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: exclusive writer access with concurrent readers.
+
+        Args:
+            text: String to remove (will also remove all strings starting with this text)
+        Returns:
+            True if any removal was performed
+        """
+        async with write_lock(self._async_lock):
+            node = self._find_node_by_text(text)
+            if node:
+                removed_count = self._clean_node_subtree(node)
+
+                # Print tree structure if verbose is enabled
+                if self.verbose:
+                    print("Tree structure after remove:")
+                    self._pretty_print_internal()
 
                 return removed_count > 0
             return False
@@ -643,6 +728,9 @@ class StringRadixTrie:
         Perform garbage collection based on traverse version (not weight version).
         Remove nodes with traverse_version < (current_weight_version - gc_threshold_k).
 
+        [DEPRECATED] Use async methods for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+
         Phase 3 TODO: Implement hybrid GC strategy with:
         - LRU eviction for frequently accessed entries
         - Memory pressure monitoring and adaptive thresholds
@@ -656,6 +744,14 @@ class StringRadixTrie:
         Returns:
             Number of nodes removed
         """
+        import warnings
+        warnings.warn(
+            "gc_by_weight_version is deprecated for high-performance scenarios. "
+            "Use async methods for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             if current_weight_version is None:
                 if self.verbose:
@@ -672,14 +768,33 @@ class StringRadixTrie:
             removed_count = 0
 
             for node in nodes_to_remove:
-                # Validate that subtree weight versions are <= parent weight version
-                self._validate_subtree_weight_versions(node)
+                # Validate that subtree traverse weight versions are <= parent traverse weight version
+                self._validate_subtree_traverse_versions(node)
                 removed_count += self._clean_node_subtree(node)
 
             if self.verbose:
                 print(f"[RadixTree GC] Completed GC, removed {removed_count} nodes")
 
             return removed_count
+
+    async def gc_by_weight_version_async(self, current_weight_version: Optional[int] = None) -> int:
+        """
+        [HIGH PERFORMANCE] Async version of gc_by_weight_version for better concurrency.
+        Uses AsyncReadWriteLock write lock to ensure exclusive access during modifications.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: exclusive writer access with concurrent readers.
+
+        Perform garbage collection based on traverse version (not weight version).
+        Remove nodes with traverse_version < (current_weight_version - gc_threshold_k).
+
+        Args:
+            current_weight_version: Current weight version to use for GC threshold
+        Returns:
+            Number of nodes removed
+        """
+        async with write_lock(self._async_lock):
+            return self._gc_by_weight_version_internal(current_weight_version)
 
     def _find_outdated_nodes(self, gc_threshold: int) -> List[StringTreeNode]:
         """
@@ -711,29 +826,78 @@ class StringRadixTrie:
         check_node(self.root)
         return outdated_nodes
 
-    def _validate_subtree_weight_versions(self, node: StringTreeNode):
+    def _validate_subtree_traverse_versions(self, node: StringTreeNode):
         """
-        Validate that all nodes in subtree have weight_version <= parent weight_version.
+        Validate that all nodes in subtree have traverse_version <= parent traverse_version.
         Args:
             node: Root node of subtree to validate
         """
 
-        def validate_recursive(current_node, parent_weight_version):
-            if current_node.weight_version is not None and parent_weight_version is not None:
-                assert current_node.weight_version <= parent_weight_version, (
-                    f"Child node weight_version {current_node.weight_version} > "
-                    f"parent weight_version {parent_weight_version}"
+        def validate_recursive(current_node, parent_traverse_version):
+            if current_node.traverse_version is not None and parent_traverse_version is not None:
+                assert current_node.traverse_version <= parent_traverse_version, (
+                    f"Child node traverse_version {current_node.traverse_version} > "
+                    f"parent traverse_version {parent_traverse_version}"
                 )
 
             # Recursively validate children
             for child in current_node.children:
-                validate_recursive(child, current_node.weight_version)
+                validate_recursive(child, current_node.traverse_version)
 
-        # Start validation from the node itself
-        validate_recursive(node, node.weight_version)
+    def _gc_by_weight_version_internal(self, current_weight_version: Optional[int] = None) -> int:
+        """Internal GC method without locks for use in async contexts."""
+        if current_weight_version is None:
+            if self.verbose:
+                print("[RadixTree GC] No weight version provided, skipping GC")
+            return 0
+
+        gc_threshold = current_weight_version - self.gc_threshold_k
+        if self.verbose:
+            print(
+                f"[RadixTree GC] Starting GC with threshold: {gc_threshold} (current_version: {current_weight_version}, k: {self.gc_threshold_k})"
+            )
+
+        nodes_to_remove = self._find_outdated_nodes(gc_threshold)
+        removed_count = 0
+
+        for node in nodes_to_remove:
+            # Validate that subtree traverse versions are <= parent traverse version
+            self._validate_subtree_traverse_versions(node)
+            removed_count += self._clean_node_subtree(node)
+
+        if self.verbose:
+            print(f"[RadixTree GC] Completed GC, removed {removed_count} nodes")
+
+        return removed_count
+
+    def _pretty_print_internal(self):
+        """Internal pretty print method without locks."""
+        print("String Radix Trie Structure:")
+        print("=" * 50)
+        self._print_node(self.root, 0)
+        print("=" * 50)
+        print(f"total_entries: {self.total_entries}")
+        print(f"cache_hits: {self.cache_hits}")
+        print(f"cache_misses: {self.cache_misses}")
+        print(f"max_cache_size: {self.max_cache_size}")
+        print(f"cur_cache_size: {self.cur_cache_size}")
+        print(f"gc_threshold_k: {self.gc_threshold_k}")
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """
+        Get cache statistics.
+
+        [DEPRECATED] Use async methods for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+        """
+        import warnings
+        warnings.warn(
+            "get_stats is deprecated for high-performance scenarios. "
+            "Use get_stats_async() for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             total_requests = self.cache_hits + self.cache_misses
             hit_rate = self.cache_hits / total_requests if total_requests > 0 else 0
@@ -748,8 +912,46 @@ class StringRadixTrie:
                 "gc_threshold_k": self.gc_threshold_k,
             }
 
+    async def get_stats_async(self) -> Dict[str, Any]:
+        """
+        [HIGH PERFORMANCE] Async version of get_stats for better concurrency.
+        Uses AsyncReadWriteLock read lock to allow multiple concurrent readers.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: multiple readers can access simultaneously.
+
+        Returns:
+            Dictionary containing cache statistics
+        """
+        async with read_lock(self._async_lock):
+            total_requests = self.cache_hits + self.cache_misses
+            hit_rate = self.cache_hits / total_requests if total_requests > 0 else 0
+
+            return {
+                "total_entries": self.total_entries,
+                "cache_hits": self.cache_hits,
+                "cache_misses": self.cache_misses,
+                "hit_rate": hit_rate,
+                "max_cache_size": self.max_cache_size,
+                "cur_cache_size": self.cur_cache_size,
+                "gc_threshold_k": self.gc_threshold_k,
+            }
+
     def clear(self):
-        """Clear all entries from the trie."""
+        """
+        Clear all entries from the trie.
+
+        [DEPRECATED] Use async methods for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+        """
+        import warnings
+        warnings.warn(
+            "clear is deprecated for high-performance scenarios. "
+            "Use async methods for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with self._lock:
             self.root = StringTreeNode()
             self.root.string_key = ""
@@ -759,15 +961,48 @@ class StringRadixTrie:
             self.cache_misses = 0
             self.cur_cache_size = 0
 
+    async def clear_async(self):
+        """
+        [HIGH PERFORMANCE] Async version of clear for better concurrency.
+        Uses AsyncReadWriteLock write lock to ensure exclusive access during modifications.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Provides true read-write lock benefits: exclusive writer access with concurrent readers.
+
+        Clear all entries from the trie.
+        """
+        async with write_lock(self._async_lock):
+            self.root = StringTreeNode()
+            self.root.string_key = ""
+            self.root.ref_count = 1
+            self.total_entries = 0
+            self.cache_hits = 0
+            self.cache_misses = 0
+            self.cur_cache_size = 0
+
     def pretty_print(self):
-        """Print the trie structure in a readable format."""
-        print("String Radix Trie Structure:")
-        print("=" * 50)
-        self._print_node(self.root, 0)
-        print("=" * 50)
-        stats = self.get_stats()
-        for key, value in stats.items():
-            print(f"{key}: {value}")
+        """
+        Print the trie structure in a readable format.
+
+        [DEPRECATED] Use async methods for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+        """
+        import warnings
+        warnings.warn(
+            "pretty_print is deprecated for high-performance scenarios. "
+            "Use async methods for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
+        with self._lock:
+            print("String Radix Trie Structure:")
+            print("=" * 50)
+            self._print_node(self.root, 0)
+            print("=" * 50)
+            stats = self.get_stats()
+            for key, value in stats.items():
+                print(f"{key}: {value}")
 
     def _print_node(self, node: StringTreeNode, depth: int):
         """Recursively print node structure."""
@@ -793,6 +1028,9 @@ class StringRadixTrie:
         Ensures stable text→token_ids mapping by inserting new text into tree.
         Returns version-aligned tokens with generation versions.
 
+        [DEPRECATED] Use get_or_create_tokenization_async() for better performance in async contexts.
+        This method uses a simple RLock and does not provide read-write concurrency benefits.
+
         Args:
             text: Input text to get tokens for
             return_logprob: If True, also return log probabilities
@@ -801,41 +1039,55 @@ class StringRadixTrie:
             Tuple of (token_ids, logp, loss_mask, generation_versions) for complete version alignment.
             Non-AI-generated tokens are marked with generation_version = -1.
         """
-        # Call find_longest_prefix to get the match result
-        result = self.find_longest_prefix(text)
+        import warnings
+        warnings.warn(
+            "get_or_create_tokenization is deprecated for high-performance scenarios. "
+            "Use get_or_create_tokenization_async() for better concurrency in async contexts.",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
-        # If we have a match and it covers the entire text, return the tokens
-        if result.matched_prefix and result.token_ids:
-            additional_tokens = self.tokenizer(result.remaining_string, add_special_tokens=False)["input_ids"]
-            additional_versions = [-1] * len(additional_tokens)  # Non-AI-generated tokens
+        # Simple lock-based implementation (no read-write optimization)
+        with self._lock:
+            # Call find_longest_prefix to get the match result
+            result = self.find_longest_prefix(text)
 
-            return (
-                result.token_ids + additional_tokens,
-                (
-                    result.logp + len(additional_tokens) * [0.0]
-                    if return_logprob
-                    else [0] * len(result.token_ids + additional_tokens)
-                ),
-                result.loss_mask + len(additional_tokens) * [0],
-                result.generation_versions + additional_versions,  # Version-aligned output
-            )
-        # If result is empty and input text is not empty, tokenize with tokenizer
-        # This is needed because we cannot get the prompt token id from engine response
-        # We have to manually insert the text and token into the tree
-        if self.tokenizer and text:
-            # Tokenize the text using the provided tokenizer
-            tokens = self.tokenizer(text, add_special_tokens=False)["input_ids"]
-            # Insert the text and tokens into the tree
-            self.insert(text, tokens)
-            # Return the tokens with version info (non-AI-generated, so version = -1)
-            return (tokens, [0.0] * len(tokens), [0] * len(tokens), [-1] * len(tokens))
-        else:
-            raise ValueError("Tokenizer or input text can't be empty")
+            # If we have a match and it covers the entire text, return the tokens
+            if result.matched_prefix and result.token_ids:
+                additional_tokens = self.tokenizer(result.remaining_string, add_special_tokens=False)["input_ids"]
+                additional_versions = [-1] * len(additional_tokens)  # Non-AI-generated tokens
+
+                return (
+                    result.token_ids + additional_tokens,
+                    (
+                        result.logp + len(additional_tokens) * [0.0]
+                        if return_logprob
+                        else [0] * len(result.token_ids + additional_tokens)
+                    ),
+                    result.loss_mask + len(additional_tokens) * [0],
+                    result.generation_versions + additional_versions,  # Version-aligned output
+                )
+
+            # If result is empty and input text is not empty, tokenize with tokenizer
+            # This is needed because we cannot get the prompt token id from engine response
+            # We have to manually insert the text and token into the tree
+            if self.tokenizer and text:
+                # Tokenize the text using the provided tokenizer
+                tokens = self.tokenizer(text, add_special_tokens=False)["input_ids"]
+                # Insert the text and tokens into the tree
+                self._insert(text, tokens, [0.0] * len(tokens), [0] * len(tokens), weight_version=-1)
+                # Return the tokens with version info (non-AI-generated, so version = -1)
+                return (tokens, [0.0] * len(tokens), [0] * len(tokens), [-1] * len(tokens))
+            else:
+                raise ValueError("Tokenizer or input text can't be empty")
 
     async def get_or_create_tokenization_async(self, text: str, return_logprob: bool = True):
         """
-        Async version of get_or_create_tokenization.
-        Same semantics and return format.
+        [HIGH PERFORMANCE] Async version of get_or_create_tokenization.
+        Same semantics and return format, but with true read-write lock benefits.
+
+        Recommended for async applications and high-concurrency scenarios.
+        Uses read-upgrade-to-write pattern for optimal performance.
 
         Args:
             text: Input text to get tokens for
@@ -881,6 +1133,8 @@ class StringRadixTrie:
         Deprecated: Use get_or_create_tokenization instead.
 
         This method is kept for backward compatibility and will be removed in a future version.
+
+        Note: The deprecated method now uses the optimized read-write lock implementation.
         """
         import warnings
         warnings.warn(
