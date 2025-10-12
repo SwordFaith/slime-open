@@ -1,5 +1,16 @@
 # Slime Router Testing Standards
 
+## Recent Reorganization (2025-10-12)
+
+The test directory structure was reorganized to follow the 3-layer testing architecture:
+
+- **Removed**: `comprehensive/` directory - tests have been properly categorized into `unit/` or `integration/`
+- **Enhanced**: `unit/` directory - added focused unit tests for GC, version consistency, and performance
+- **Enhanced**: `integration/` directory - added comprehensive integration and performance tests
+- **Improved**: Documentation - updated this document to reflect the new structure
+
+This reorganization improves maintainability and follows established testing standards while preserving all test coverage.
+
 ## File Naming Conventions
 
 ### Test File Names
@@ -56,17 +67,45 @@ def test_specific_behavior():
 ### Directory Structure
 ```
 tests/router/
-├── unit/           # Unit tests with mocked dependencies
-├── integration/    # Integration tests with real components
-├── e2e/           # End-to-end tests with full system
-├── mocks/         # Shared mock utilities
-└── conftest.py    # Shared fixtures and configuration
+├── unit/                     # Unit tests with mocked dependencies
+│   ├── test_radix_tree_core_merged.py      # Core radix tree functionality
+│   ├── test_radix_tree_async_core.py       # Async radix tree core
+│   ├── test_radix_tree_async_integration.py # Async integration tests
+│   ├── test_gc_unit.py                     # Garbage collection unit tests
+│   ├── test_version_consistency.py         # Version consistency tests
+│   ├── test_performance_gc_merged.py       # Performance and GC tests
+│   └── test_openai_middleware_merged.py    # OpenAI middleware tests
+├── integration/              # Integration tests with real components
+│   ├── test_openai_integration.py         # OpenAI API integration
+│   ├── test_performance_integration.py     # Performance integration tests
+│   ├── test_comprehensive_integration.py   # Comprehensive functionality tests
+│   ├── test_radix_tree_middleware.py      # Radix tree middleware tests
+│   ├── test_router_concurrency.py         # Router concurrency tests
+│   ├── test_router_metrics_simple.py      # Router metrics tests
+│   ├── test_simplified_chat_completion.py  # Chat completion tests
+│   └── test_streaming_and_cache.py        # Streaming and cache tests
+├── e2e/                      # End-to-end tests with full system
+│   └── test_openai_e2e.py                   # OpenAI E2E tests
+├── mocks/                    # Shared mock utilities
+│   └── remote_sglang_client.py             # SGLang client mocks
+├── conftest.py               # Shared fixtures and configuration
+└── TESTING_STANDARDS.md      # This document
 ```
 
 ### Test Categories
 - **Unit Tests**: Test individual components in isolation
+  - Core functionality (radix tree algorithms, data structures)
+  - Garbage collection mechanisms
+  - Version consistency and management
+  - Basic OpenAI middleware operations
 - **Integration Tests**: Test component interactions
+  - Performance benchmarking and scalability
+  - Comprehensive functionality across multiple components
+  - Router concurrency and metrics
+  - Streaming and caching integration
 - **E2E Tests**: Test complete user workflows
+  - Full OpenAI API integration
+  - End-to-end request/response flows
 
 ## Mock Strategy Guidelines
 

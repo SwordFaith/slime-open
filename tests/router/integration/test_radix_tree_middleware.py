@@ -20,8 +20,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 from fastapi import Request, FastAPI
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
-from slime.router.middleware_hub.radix_tree_middleware import RadixTreeMiddleware
-from slime.router.middleware_hub.radix_tree import StringRadixTrie
+from slime.router.middleware.radix_tree_middleware import RadixTreeMiddleware
+from slime.router.core.radix_tree import StringRadixTrie
 
 
 # ============================================================================

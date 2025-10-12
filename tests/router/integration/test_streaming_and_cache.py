@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Request
 
-from slime.router.openai_chat_completion import ChatCompletionHandler
-from slime.router.middleware_hub.radix_tree_middleware import RadixTreeMiddleware
+from slime.router.handlers.openai_chat_completion import ChatCompletionHandler
+from slime.router.middleware.radix_tree_middleware import RadixTreeMiddleware
 
 
 class TestStreamingResponses:

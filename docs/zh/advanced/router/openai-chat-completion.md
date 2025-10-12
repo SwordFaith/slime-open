@@ -242,17 +242,17 @@ async def stream_chat_completion(messages):
 **测试先行**:
 ```bash
 # 1. 创建测试文件
-tests/router/unit/test_openai_chat_completion.py
+tests/router/unit/test_openai_middleware_merged.py
 tests/router/integration/test_openai_integration.py
 tests/router/e2e/test_openai_e2e.py
 
 # 2. 编写测试用例（预期失败）
-pytest tests/router/unit/test_openai_chat_completion.py -v
+pytest tests/router/unit/test_openai_middleware_merged.py -v
 # ❌ FAILED (expected - implementation missing)
 
 # 3. 实现核心逻辑
 # 4. 验证测试通过
-pytest tests/router/unit/test_openai_chat_completion.py -v
+pytest tests/router/unit/test_openai_middleware_merged.py -v
 # ✅ PASSED
 ```
 
@@ -309,7 +309,7 @@ async def stream_chat_completion(messages):
 
 ### 5.1 单元测试
 
-**测试文件**: `tests/router/unit/test_openai_chat_completion.py`
+**测试文件**: `tests/router/unit/test_openai_middleware_merged.py`
 
 **测试用例**:
 ```python

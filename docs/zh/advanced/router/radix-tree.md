@@ -808,11 +808,10 @@ RadixTreeMiddleware 无需修改即可适配新版本架构：
 - **Radix Tree 实现**: `slime/router/core/radix_tree.py` (698 lines)
 - **异步读写锁**: `slime/router/utils/async_read_write_lock.py` (172 lines)
 - **RadixTreeMiddleware**: `slime/router/middleware/radix_tree_middleware.py` (289 lines)
-- **单元测试**:
-  - `tests/router/unit/test_radix_tree_core.py` (Radix Tree 核心功能测试)
-  - `tests/router/unit/test_weight_version_separation.py` (版本分离架构 TDD 测试)
-  - `tests/router/unit/test_async_read_write_lock.py` (异步读写锁测试)
-  - `tests/router/unit/test_radix_tree_async.py` (异步操作测试)
-  - `tests/router/unit/test_radix_tree_middleware_async.py` (中间件异步测试)
-  - `tests/router/unit/test_performance_comparison.py` (性能对比测试)
+- **单元测试** (已合并优化):
+  - `tests/router/unit/test_radix_tree_core_merged.py` (Radix Tree 核心功能 + 版本分离 + 一致性测试)
+  - `tests/router/unit/test_radix_tree_async_core.py` (异步核心操作 + 读写锁测试)
+  - `tests/router/unit/test_radix_tree_async_integration.py` (异步集成 + 性能问题测试)
+  - `tests/router/unit/test_performance_gc_merged.py` (性能对比 + GC一致性测试)
+  - `tests/router/unit/test_openai_middleware_merged.py` (OpenAI + 中间件 + 重试逻辑测试)
 - **集成测试**: `tests/router/integration/test_radix_tree_middleware.py`

@@ -20,12 +20,12 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 
-from slime.router.openai_chat_completion import (
+from slime.router.handlers.openai_chat_completion import (
     ChatCompletionHandler,
     ChatCompletionRequest,
     create_chat_completion_handler,
 )
-from slime.router.middleware_hub.radix_tree_middleware import RadixTreeMiddleware
+from slime.router.middleware.radix_tree_middleware import RadixTreeMiddleware
 from slime.router.router import SlimeRouter
 
 
