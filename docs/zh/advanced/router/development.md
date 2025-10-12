@@ -12,23 +12,33 @@ pip install -e ".[dev]"
 pytest tests/router/unit/ -v
 ```
 
-### 1.2 项目结构
+### 1.2 项目结构 (2025-10-12 重构)
 
 ```
 slime/router/
-├── router.py                     # FastAPI 路由服务
-├── openai_chat_completion.py     # OpenAI API 兼容层
-├── component_registry.py         # 组件依赖注入
-└── middleware_hub/               # 中间件插件系统
-    ├── radix_tree_middleware.py  # Radix Tree 缓存中间件
-    ├── radix_tree.py            # 前缀缓存数据结构
-    └── async_read_write_lock.py # 异步读写锁
+├── core/                        # 核心数据结构层
+│   └── radix_tree.py           # Radix Tree 前缀缓存实现
+├── middleware/                  # 中间件层
+│   └── radix_tree_middleware.py # 缓存中间件实现
+├── handlers/                    # 请求处理层
+│   └── openai_chat_completion.py # OpenAI API 兼容处理器
+├── utils/                       # 工具层
+│   ├── component_registry.py    # 组件依赖注入
+│   └── async_read_write_lock.py # 异步读写锁
+└── router.py                    # FastAPI 路由服务
 
 tests/router/
 ├── unit/                        # 单元测试（快速，无依赖）
 ├── integration/                 # 集成测试（Mock 外部依赖）
+├── comprehensive/               # 综合测试（完整功能验证）
 └── e2e/                        # 端到端测试（需要真实服务）
 ```
+
+**架构优势**：
+- **清晰的职责分离**: 核心算法、中间件逻辑、请求处理、工具类各司其职
+- **高内聚低耦合**: 相关功能集中，模块间依赖最小化
+- **易于维护**: 代码组织直观，定位和修改容易
+- **便于扩展**: 新功能有明确的归属位置
 
 ---
 
@@ -57,7 +67,7 @@ class CustomMiddleware(BaseHTTPMiddleware):
 ```bash
 python -m slime.ray.rollout \
   --use-slime-router \
-  --slime-router-middleware-paths slime.router.middleware_hub.custom_middleware.CustomMiddleware
+  --slime-router-middleware-paths slime.router.middleware.custom_middleware.CustomMiddleware
 ```
 
 ### 2.3 日志示例
@@ -190,7 +200,7 @@ async def test_concurrent_operations():
 
 ```python
 import pytest
-from slime.router.middleware_hub.radix_tree import StringRadixTrie
+from slime.router.core.radix_tree import StringRadixTrie
 
 def test_radix_tree_insert_and_query():
     """Test basic insert and query operations."""
@@ -242,6 +252,7 @@ async def test_middleware_cache_insertion(mocker):
     }
 
     mock_call_next = AsyncMock(return_value=create_response(sglang_response))
+    from slime.router.middleware.radix_tree_middleware import RadixTreeMiddleware
     middleware = RadixTreeMiddleware(app, router=mock_router)
     middleware.tokenizer = mock_tokenizer
     request = create_request({"text": "Hello"})
@@ -442,7 +453,7 @@ curl -X POST "http://localhost:30000/remove_worker?url=http://worker3:10090"
 **验证**：
 ```python
 # 检查代码中是否有同步 sleep
-grep -r "sleep(" slime/router/middleware_hub/
+grep -r "sleep(" slime/router/
 # 应该只有 "asyncio.sleep"
 ```
 
@@ -514,7 +525,7 @@ git checkout -b feat/my-new-feature
 **2. 编写代码 + 测试**：
 ```bash
 # 编写代码
-vim slime/router/middleware_hub/my_middleware.py
+vim slime/router/middleware/my_middleware.py
 
 # 编写测试
 vim tests/router/unit/test_my_middleware.py
@@ -553,9 +564,11 @@ git push origin feat/my-new-feature
 
 ### 代码位置
 - **Router 实现**: `slime/router/router.py`
-- **Radix Tree**: `slime/router/middleware_hub/radix_tree.py`
-- **Middleware**: `slime/router/middleware_hub/radix_tree_middleware.py`
-- **测试代码**: `tests/router/unit/`, `tests/router/integration/`
+- **Radix Tree**: `slime/router/core/radix_tree.py`
+- **Middleware**: `slime/router/middleware/radix_tree_middleware.py`
+- **OpenAI Handler**: `slime/router/handlers/openai_chat_completion.py`
+- **Utils**: `slime/router/utils/` (component_registry.py, async_read_write_lock.py)
+- **测试代码**: `tests/router/unit/`, `tests/router/integration/`, `tests/router/comprehensive/`
 
 ### 社区
 - **GitHub Issues**: https://github.com/THUDM/slime/issues

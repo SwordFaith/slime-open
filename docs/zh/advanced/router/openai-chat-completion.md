@@ -132,7 +132,7 @@ graph TB
 ### 3.2 核心组件
 
 #### 3.2.1 ChatCompletion Handler
-- **位置**: `slime/router/chat_completion.py`
+- **位置**: `slime/router/handlers/openai_chat_completion.py`
 - **职责**:
   - OpenAI API 参数解析
   - Message 格式转换
@@ -257,7 +257,7 @@ pytest tests/router/unit/test_openai_chat_completion.py -v
 ```
 
 **核心模块创建**:
-- `slime/router/chat_completion.py` - 主要处理逻辑
+- `slime/router/handlers/openai_chat_completion.py` - 主要处理逻辑
 - Message 格式转换器
 - OpenAI 参数验证器
 
@@ -555,10 +555,10 @@ tail -f /var/log/slime/router.log | grep "ChatCompletion"
 #### 核心实现文件
 ```
 slime/router/
-├── openai_chat_completion.py     # 主要实现 (674 lines)
-├── router.py                     # 路由集成 (新增 /v1/chat/completions)
-└── middleware_hub/
-    └── radix_tree_middleware.py  # 缓存支持 (ComponentRegistry 集成)
+├── handlers/openai_chat_completion.py   # 主要实现 (674 lines)
+├── router.py                             # 路由集成 (新增 /v1/chat/completions)
+└── middleware/
+    └── radix_tree_middleware.py          # 缓存支持 (ComponentRegistry 集成)
 ```
 
 #### 测试文件
@@ -566,6 +566,7 @@ slime/router/
 tests/router/
 ├── unit/test_openai_chat_completion.py      # 单元测试 (20 tests)
 ├── integration/test_openai_integration.py   # 集成测试 (8 tests)
+├── comprehensive/test_comprehensive.py     # 综合测试 (10 tests)
 ├── e2e/test_openai_e2e.py                   # E2E 测试 (15 tests)
 └── TESTING_STANDARDS.md                     # 测试标准规范
 ```
@@ -592,7 +593,7 @@ python -m slime.ray.rollout \
   --hf-checkpoint /path/to/model \
   --enable-openai-chat-completion \
   --radix-tree-max-size 50000 \
-  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+  --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware
 ```
 
 #### 监控指标

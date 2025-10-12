@@ -17,6 +17,7 @@
 tests/router/
 ├── unit/                    # 单元测试 - 测试单个组件
 ├── integration/             # 集成测试 - 测试组件交互
+├── comprehensive/           # 综合测试 - 完整功能验证
 ├── e2e/                    # 端到端测试 - 测试完整流程
 ├── mocks/                  # 共享 Mock 工具
 ├── conftest.py             # 共享 fixtures
@@ -101,7 +102,7 @@ class TestMiddlewareIntegration:
     async def test_cache_flow_integration(self):
         """测试缓存流程的完整集成"""
         # 使用真实组件，但 Mock 外部依赖
-        with patch('slime.router.middleware_hub.radix_tree_middleware.AutoTokenizer') as mock_tokenizer:
+        with patch('slime.router.middleware.radix_tree_middleware.AutoTokenizer') as mock_tokenizer:
             # 设置真实的中间件行为
             mock_tokenizer_instance = Mock()
             mock_tokenizer_instance.side_effect = self.mock_tokenizer_behavior

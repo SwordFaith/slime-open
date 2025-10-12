@@ -25,7 +25,7 @@ python -m slime.ray.rollout \
   --sglang-router-port 30000 \
   --hf-checkpoint /path/to/model \
   --use-slime-router \
-  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+  --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware
 
 # 完整启动命令（包含所有可选参数）
 python -m slime.ray.rollout \
@@ -35,7 +35,7 @@ python -m slime.ray.rollout \
   --radix-tree-max-size 10000 \
   --verbose \
   --use-slime-router \
-  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+  --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware
 ```
 
 ### 2. 启动参数详解
@@ -132,7 +132,7 @@ Slime Router 提供了 100% 兼容 OpenAI Chat Completion API 的接口，让您
 python -m slime.ray.rollout \
   --hf-checkpoint /path/to/model \
   --enable-openai-chat-completion \
-  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware \
+  --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware \
   [其他参数...]
 ```
 
@@ -387,7 +387,7 @@ Available components: ['radix_tree']
 3. **Invalid middleware path**
    ```bash
    # 确保中间件路径正确
-   --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+   --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware
    ```
 
 ### 开发者自定义组件

@@ -35,7 +35,19 @@
 
 ## 2. 核心架构
 
-### 2.1 三层架构设计
+### 2.1 分层架构设计 (2025-10-12 重构)
+
+#### 2.1.1 设计原则
+
+Slime Router 采用**分层架构**模式，将系统按职责划分为清晰的层次，实现高内聚、低耦合的架构设计。
+
+**核心设计原则**：
+- **关注点分离**: 每一层专注于特定的职责
+- **依赖方向**: 上层依赖下层，下层不依赖上层
+- **接口抽象**: 通过定义清晰的接口实现解耦
+- **单一职责**: 每个组件只负责一个明确的功能
+
+#### 2.1.2 架构层次
 
 ```mermaid
 graph TB
@@ -88,17 +100,44 @@ graph TB
     class S1,S2,S3 inferenceClass
 ```
 
-**职责划分**：
+#### 2.1.3 目录结构 (2025-10-12 重构)
 
-| 层级 | 组件 | 职责 |
-|-----|------|------|
-| **User Layer** | Workflow User | 发起 `/generate` 请求，获取 text |
-| | OpenAI SDK User | 使用 `/v1/chat/completions`，标准对话体验 |
-| | RL User | 通过 `/retrieve_from_text` `/retrieve_from_messages_template` 获取训练 tokens |
-| **Router Layer** | ChatCompletion Handler | OpenAI API 兼容层，消息格式转换 |
-| | RadixTree Middleware | 缓存 tokens，管理 loss mask |
-| | Slime Router + ComponentRegistry | 负载均衡，统一组件管理 |
-| **Inference Layer** | SGLang Workers | 实际推理，返回 tokens + logp |
+**新的分层目录结构**：
+```
+slime/router/
+├── core/                       # 核心数据结构层
+│   └── radix_tree.py          # Radix Tree 前缀缓存实现
+├── middleware/                 # 中间件层
+│   └── radix_tree_middleware.py  # 缓存中间件实现
+├── handlers/                   # 请求处理层
+│   └── openai_chat_completion.py  # OpenAI API 兼容处理器
+├── utils/                      # 工具层
+│   ├── component_registry.py     # 组件依赖注入
+│   └── async_read_write_lock.py  # 异步读写锁
+└── router.py                  # FastAPI 路由服务
+```
+
+**架构优势**：
+- **清晰的职责分离**: 核心算法、中间件逻辑、请求处理、工具类各司其职
+- **高内聚低耦合**: 相关功能集中，模块间依赖最小化
+- **易于维护**: 代码组织直观，定位和修改容易
+- **便于扩展**: 新功能有明确的归属位置
+- **符合最佳实践**: 遵循软件工程的分层架构原则
+
+#### 2.1.4 组件职责划分
+
+| 层级 | 目录 | 组件 | 职责 |
+|-----|------|------|------|
+| **User Layer** | - | Workflow User | 发起 `/generate` 请求，获取 text |
+| | | OpenAI SDK User | 使用 `/v1/chat/completions`，标准对话体验 |
+| | | RL User | 通过 `/retrieve_from_text` 获取训练 tokens |
+| **Router Layer** | `handlers/` | ChatCompletion Handler | OpenAI API 兼容层，消息格式转换 |
+| | `middleware/` | RadixTree Middleware | 缓存 tokens，管理 loss mask |
+| | `utils/` | ComponentRegistry | 统一组件管理，依赖注入 |
+| | `utils/` | AsyncReadWriteLock | 异步并发控制 |
+| | `core/` | Radix Tree | 前缀缓存数据结构 |
+| | - | Slime Router | 负载均衡，请求路由 |
+| **Inference Layer** | - | SGLang Workers | 实际推理，返回 tokens + logp |
 
 ### 2.2 前缀缓存概览
 
@@ -192,7 +231,7 @@ sequenceDiagram
 
 #### 2.3.3 核心组件
 
-##### ChatCompletionHandler (`slime/router/openai_chat_completion.py`)
+##### ChatCompletionHandler (`slime/router/handlers/openai_chat_completion.py`)
 
 **主要职责**：
 - OpenAI API 参数解析和验证
@@ -906,6 +945,8 @@ for _ in range(5):
 
 ### 代码位置
 - **Router 服务**: `slime/router/router.py`
-- **Radix Tree 实现**: `slime/router/middleware_hub/radix_tree.py`
-- **Middleware 实现**: `slime/router/middleware_hub/radix_tree_middleware.py`
-- **测试代码**: `tests/router/unit/`, `tests/router/integration/`
+- **Radix Tree 实现**: `slime/router/core/radix_tree.py`
+- **Middleware 实现**: `slime/router/middleware/radix_tree_middleware.py`
+- **OpenAI Handler**: `slime/router/handlers/openai_chat_completion.py`
+- **Utils**: `slime/router/utils/` (component_registry.py, async_read_write_lock.py)
+- **测试代码**: `tests/router/unit/`, `tests/router/integration/`, `tests/router/comprehensive/

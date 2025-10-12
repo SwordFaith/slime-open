@@ -805,9 +805,9 @@ RadixTreeMiddleware 无需修改即可适配新版本架构：
 - **开发者指南**: [development.md](development.md)
 
 ### 代码位置
-- **Radix Tree 实现**: `slime/router/middleware_hub/radix_tree.py` (698 lines)
-- **异步读写锁**: `slime/router/middleware_hub/async_read_write_lock.py` (172 lines)
-- **RadixTreeMiddleware**: `slime/router/middleware_hub/radix_tree_middleware.py` (289 lines)
+- **Radix Tree 实现**: `slime/router/core/radix_tree.py` (698 lines)
+- **异步读写锁**: `slime/router/utils/async_read_write_lock.py` (172 lines)
+- **RadixTreeMiddleware**: `slime/router/middleware/radix_tree_middleware.py` (289 lines)
 - **单元测试**:
   - `tests/router/unit/test_radix_tree_core.py` (Radix Tree 核心功能测试)
   - `tests/router/unit/test_weight_version_separation.py` (版本分离架构 TDD 测试)

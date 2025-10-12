@@ -30,7 +30,7 @@ python -m slime.ray.rollout \
   --hf-checkpoint $MODEL_PATH \
   --use-slime-router \
   --enable-openai-chat-completion \
-  --slime-router-middleware-paths slime.router.middleware_hub.radix_tree_middleware.RadixTreeMiddleware
+  --slime-router-middleware-paths slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware
 
 # 2. 注册 SGLang worker
 curl -X POST "http://localhost:30000/add_worker?url=http://localhost:10090"
@@ -79,12 +79,13 @@ print(response.choices[0].message.content)
 
 ### 🏗️ 技术设计
 
-- **[系统架构](architecture.md)** - 三层架构设计和 ComponentRegistry 原理
+- **[系统架构](architecture.md)** - 分层架构设计和 ComponentRegistry 原理
 - **[Radix Tree](radix-tree.md)** - 前缀缓存数据结构详解
 
 ### 🛠️ 开发文档
 
-- **[开发指南](development.md)** - 中间件开发、测试策略和贡献流程
+- **[开发指南](development.md)** - 分层架构开发、测试策略和贡献流程
+- **[测试指南](testing-guide.md)** - 完整的测试标准和最佳实践
 
 ## 核心概念
 
@@ -115,8 +116,8 @@ print(response.choices[0].message.content)
 
 ---
 
-**开始探索**: [用户指南](user-guide.md) → [OpenAI API](openai-chat-completion.md) → [系统架构](architecture.md) → [开发指南](development.md)
+**开始探索**: [用户指南](user-guide.md) → [OpenAI API](openai-chat-completion.md) → [系统架构](architecture.md) → [开发指南](development.md) → [测试指南](testing-guide.md)
 
-**最后更新**: 2025-10-11
+**最后更新**: 2025-10-12
 **版本**: v0.1.0
-**状态**: 生产就绪，支持 OpenAI Chat Completion API
+**状态**: 生产就绪，支持 OpenAI Chat Completion API，已完成分层架构重构
