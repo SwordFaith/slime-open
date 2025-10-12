@@ -9,8 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 
-from slime.router.utils.component_registry import ComponentRegistry
 from slime.router.middleware.radix_tree_middleware import _filter_headers
+from slime.router.utils.component_registry import ComponentRegistry
 from slime.utils.misc import load_function
 
 
@@ -80,10 +80,8 @@ class SlimeRouter:
         self.app.post("/generate")(self.generate)
         self.app.get("/generate")(self.generate)
 
-        # OpenAI Chat Completion API (if enabled)
-        if (hasattr(self.args, 'enable_openai_chat_completion') and
-            self.args.enable_openai_chat_completion):
-            self.app.post("/v1/chat/completions")(self.chat_completions)
+        # OpenAI Chat Completion API
+        self.app.post("/v1/chat/completions")(self.chat_completions)
 
         # Catch-all route for proxying to SGLang - must be registered LAST
         self.app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy)
@@ -687,12 +685,6 @@ if __name__ == "__main__":
             nargs="+",
             default="",
         )
-    parser.add_argument(
-        "--enable-openai-chat-completion",
-        action="store_true",
-        default=False,
-        help="Enable OpenAI-compatible Chat Completion API endpoint",
-    )
     parser.add_argument(
         "--radix-tree-max-size",
         type=int,
