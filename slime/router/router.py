@@ -405,33 +405,34 @@ class SlimeRouter:
         Returns:
             bool: True if cache is available, False otherwise
         """
+        # First check without lock (fast path)
+        if self._cache_available is not None:
+            return self._cache_available
+
         # Use cache lock to ensure thread-safe initialization
-        if self._cache_available is None:
-            with self._cache_lock:
-            # Double-check pattern: another thread might have set the result while we waited for the lock
-                try:
-                    # Get component registry safely (this uses its own lock)
-                    registry = self.get_component_registry()
+        with self._cache_lock:
+            # Double-check: another thread might have set the result while we waited for the lock
+            if self._cache_available is not None:
+                return self._cache_available
 
-                    # Check if router has the required components
-                    if (registry.has("radix_tree") and registry.has("tokenizer")):
+            # Perform the actual check
+            try:
+                # Get component registry safely (this uses its own lock)
+                registry = self.get_component_registry()
 
-                        # Cache and return result (under cache lock)
-                        self._cache_available = True
-                        if self.verbose:
-                            print(f"[slime-router] Cache available through component registry")
-                        return self._cache_available
-                    else:
-                        # Cache and return result (under cache lock)
-                        self._cache_available = False
-                        if self.verbose:
-                            print(f"[slime-router] Cache not available: missing components")
-                        return self._cache_available
-                except Exception as e:
-                    # Cache and return result (under cache lock)
+                # Check if router has the required components
+                if registry.has("radix_tree") and registry.has("tokenizer"):
+                    self._cache_available = True
+                    if self.verbose:
+                        print(f"[slime-router] Cache available through component registry")
+                else:
                     self._cache_available = False
                     if self.verbose:
-                        print(f"[slime-router] Cache availability check error: {e}")
+                        print(f"[slime-router] Cache not available: missing components")
+            except Exception as e:
+                self._cache_available = False
+                if self.verbose:
+                    print(f"[slime-router] Cache availability check error: {e}")
 
         return self._cache_available
 
