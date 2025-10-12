@@ -118,5 +118,5 @@ print(response.choices[0].message.content)
 **开始探索**: [用户指南](user-guide.md) → [OpenAI API](openai-chat-completion.md) → [系统架构](architecture.md) → [开发指南](development.md)
 
 **最后更新**: 2025-10-11
-**版本**: v1.0.0
+**版本**: v0.1.0
 **状态**: 生产就绪，支持 OpenAI Chat Completion API
