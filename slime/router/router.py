@@ -450,15 +450,9 @@ class SlimeRouter:
         if not hasattr(self, '_chat_completion_handler'):
             self._chat_completion_handler = create_chat_completion_handler(self)
 
-        # Handle request
-        import json
-        body = await request.body()
-        data = json.loads(body) if body else {}
-
-        from slime.router.handlers.openai_chat_completion import ChatCompletionRequest
-        chat_request = ChatCompletionRequest(**data)
-
-        return await self._chat_completion_handler.handle_request(chat_request)
+        # Handle request - pass FastAPI Request directly to handler
+        # The handler will parse and validate the request internally
+        return await self._chat_completion_handler.handle_request(request)
 
     def get_component_registry(self) -> ComponentRegistry:
         """

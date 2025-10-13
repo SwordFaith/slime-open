@@ -22,12 +22,22 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
+
+# Try to import SGLang parsers for advanced output processing
+try:
+    from sglang.srt.parser.reasoning_parser import ReasoningParser
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
+    SGLANG_PARSERS_AVAILABLE = True
+except ImportError:
+    SGLANG_PARSERS_AVAILABLE = False
+    ReasoningParser = None
+    FunctionCallParser = None
 
 
 class ChatCompletionHandler:
@@ -51,6 +61,8 @@ class ChatCompletionHandler:
         self.router = router
         self.args = router.args
         self._cache_available = None  # Cache the availability check result
+        self._reasoning_parser = None  # Lazy-initialized reasoning parser
+        self._function_call_parser = None  # Lazy-initialized function call parser
 
     async def _check_cache_availability(self):
         """
@@ -122,8 +134,8 @@ class ChatCompletionHandler:
             # Direct mode: Proxy to SGLang Chat Completion API
             return await self._proxy_to_sglang_chat(request)
 
-        # Cached mode: Use unified generate flow
-        return await self._handle_with_generate_flow(request_data, stream)
+        # Cached mode: Direct flow with radix cache (no internal HTTP)
+        return await self._handle_with_radix_cache(request_data, stream)
 
     def _validate_chat_completion_request(self, request_data: dict):
         """
@@ -165,6 +177,90 @@ class ChatCompletionHandler:
                     status_code=400,
                     detail=f"Invalid request: message at index {i} must have 'role' and 'content' fields"
                 )
+
+    def _parse_generated_output(
+        self,
+        generated_text: str,
+        request_data: dict
+    ) -> Tuple[str, Optional[dict], Optional[str]]:
+        """
+        Parse generated output with SGLang parsers (reasoning + tool calls).
+
+        This method integrates SGLang's reasoning parser and function call parser
+        to process the raw model output into structured format.
+
+        Args:
+            generated_text: Raw text from model generation
+            request_data: Original request data (for tools, reasoning config)
+
+        Returns:
+            Tuple of (final_text, tool_calls, reasoning_text)
+            - final_text: Text content to show to user (after parsing)
+            - tool_calls: Parsed tool calls (if any)
+            - reasoning_text: Extracted reasoning content (if any)
+        """
+        if not SGLANG_PARSERS_AVAILABLE:
+            # Parsers not available - return raw text
+            return generated_text, None, None
+
+        final_text = generated_text
+        tool_calls = None
+        reasoning_text = None
+
+        try:
+            # Step 1: Parse reasoning content (if reasoning parser configured)
+            reasoning_parser_type = getattr(self.args, 'reasoning_parser', None)
+            if reasoning_parser_type:
+                if not self._reasoning_parser:
+                    # Lazy initialize reasoning parser
+                    self._reasoning_parser = ReasoningParser(
+                        model_type=reasoning_parser_type,
+                        stream_reasoning=False  # For non-streaming, accumulate reasoning
+                    )
+
+                # Parse reasoning
+                reasoning_text, normal_text = self._reasoning_parser.parse_non_stream(final_text)
+                final_text = normal_text if normal_text else final_text
+
+            # Step 2: Parse tool calls (if tools provided)
+            tools = request_data.get("tools")
+            tool_call_parser_type = getattr(self.args, 'tool_call_parser', None)
+
+            if tools and tool_call_parser_type:
+                if not self._function_call_parser:
+                    # Lazy initialize function call parser
+                    from sglang.srt.entrypoints.openai.protocol import Tool
+                    # Convert OpenAI tool format to SGLang Tool format if needed
+                    sglang_tools = [Tool(**tool) if isinstance(tool, dict) else tool for tool in tools]
+                    self._function_call_parser = FunctionCallParser(
+                        tools=sglang_tools,
+                        tool_call_parser=tool_call_parser_type
+                    )
+
+                # Parse tool calls
+                remaining_text, parsed_calls = self._function_call_parser.parse_non_stream(final_text)
+                if parsed_calls:
+                    final_text = remaining_text
+                    # Convert SGLang ToolCallItem to OpenAI tool_calls format
+                    tool_calls = [
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(call.arguments) if isinstance(call.arguments, dict) else call.arguments
+                            }
+                        }
+                        for call in parsed_calls
+                    ]
+
+        except Exception as e:
+            # Parser error - log and return raw text
+            if getattr(self.args, 'verbose', False):
+                print(f"[slime-router] Warning: Parser error, using raw output: {e}")
+            return generated_text, None, None
+
+        return final_text, tool_calls, reasoning_text
 
     async def _proxy_to_sglang_chat(self, request: Request):
         """
@@ -328,9 +424,17 @@ class ChatCompletionHandler:
                 detail="Service error: Unable to process request"
             )
 
-    async def _handle_with_generate_flow(self, request_data: dict, stream: bool):
+    async def _handle_with_radix_cache(self, request_data: dict, stream: bool):
         """
-        Cached mode: Use unified generate flow with cache support.
+        Cached mode: Direct flow with radix cache (no internal HTTP).
+
+        This method implements the Two-Path Architecture for cache-enabled mode:
+        1. Apply chat template to get text
+        2. Query radix cache to get token_ids
+        3. Call SGLang /generate directly with tokens (token in, token out)
+        4. Maintain radix cache with output tokens
+        5. Parse output with tool call/reasoning parsers
+        6. Convert to OpenAI chat.completion format
 
         Args:
             request_data: Parsed request data
@@ -342,7 +446,7 @@ class ChatCompletionHandler:
         messages = request_data.get("messages", [])
         tools = request_data.get("tools", None)
 
-        # Step 1: Get tokens directly from router's component registry
+        # Step 1: Get tokenizer and radix tree from component registry
         try:
             # Get radix tree and tokenizer from router's component registry
             radix_tree = None
@@ -363,7 +467,7 @@ class ChatCompletionHandler:
             if not radix_tree or not tokenizer:
                 raise RuntimeError("Radix tree or tokenizer not available")
 
-            # Convert messages to text using tokenizer.apply_chat_template
+            # Step 2: Apply chat template to convert messages to text
             text = tokenizer.apply_chat_template(
                 messages,
                 tools=tools,
@@ -374,10 +478,10 @@ class ChatCompletionHandler:
             if not text or not text.strip():
                 raise RuntimeError("Messages template resulted in empty text")
 
-            # Get tokenization from radix tree
-            generation_tokens, _, _, _ = await radix_tree.get_or_create_tokenization_async(text)
+            # Step 3: Query radix cache to get token_ids
+            token_ids, _, _, _ = await radix_tree.get_or_create_tokenization_async(text)
 
-            if not generation_tokens:
+            if not token_ids:
                 raise RuntimeError("Failed to get tokens from radix tree")
 
         except Exception as e:
@@ -386,23 +490,13 @@ class ChatCompletionHandler:
             # Fallback to direct proxy
             return await self._proxy_to_sglang_chat_from_data(request_data)
 
-        # Step 2: Construct generate request for SGLang compatibility
-        # This request will be processed by RadixTreeMiddleware before reaching SGLang workers
-        generate_request = {
-            "input_tokens": generation_tokens,  # Tokens from cache (prefix) + remaining text
-            "sampling_params": self._build_sampling_params(request_data, stream)
-        }
+        # Step 4: Call SGLang /generate directly with tokens (token in, token out)
+        sampling_params = self._build_sampling_params(request_data, stream)
 
-        # Step 3: Forward to router's /generate endpoint
-        # The processing pipeline is:
-        # 1. RadixTreeMiddleware.query_cache_by_text() - cache lookup
-        # 2. Forward to SGLang worker with cache context
-        # 3. RadixTreeMiddleware.dispatch() - cache insertion
-        # 4. Return response with accurate token counts
         if stream:
-            return await self._stream_generate_response(generate_request)
+            return await self._stream_generate_with_cache(token_ids, sampling_params, radix_tree, text)
         else:
-            return await self._non_stream_generate_response(generate_request)
+            return await self._non_stream_generate_with_cache(token_ids, sampling_params, radix_tree, text, request_data)
 
     def _build_sampling_params(self, request_data: dict, stream: bool) -> dict:
         """
@@ -444,43 +538,175 @@ class ChatCompletionHandler:
         # Remove None values to keep request clean and avoid SGLang errors
         return {k: v for k, v in sampling_params.items() if v is not None}
 
-    async def _stream_generate_response(self, generate_request: dict):
+    async def _non_stream_generate_with_cache(
+        self, token_ids: list, sampling_params: dict, radix_tree, input_text: str, request_data: dict
+    ):
         """
-        Handle streaming generate response and convert to OpenAI Server-Sent Events format.
+        Non-streaming generation with direct SGLang call and cache maintenance.
 
-        This method:
-        1. Sends request to router's /generate endpoint (processed by RadixTreeMiddleware)
-        2. Processes SGLang's SSE response format
-        3. Converts to OpenAI-compatible chat.completion.chunk format
-        4. Handles errors gracefully with proper resource cleanup
+        This method implements the cache-enabled path without internal HTTP:
+        1. Call SGLang /generate directly with input_ids (token in)
+        2. Get output_ids from response (token out)
+        3. Maintain radix cache with output tokens
+        4. Convert to OpenAI chat.completion format
 
         Args:
-            generate_request: Generate API request with input_tokens and sampling_params
+            token_ids: Input token IDs from radix cache
+            sampling_params: Sampling parameters for generation
+            radix_tree: RadixTree instance for cache maintenance
+            input_text: Original input text (for cache maintenance)
+            request_data: Original request data (for model name, etc.)
 
         Returns:
-            StreamingResponse: OpenAI-formatted SSE stream with chat.completion.chunk objects
+            JSONResponse: OpenAI-formatted chat.completion response
         """
-        # Create streaming request to /generate endpoint
-        port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
-        router_url = f"http://localhost:{port}/generate"
+        # Get a worker URL
+        worker_url = await self.router._use_url()
 
+        try:
+            # Call SGLang /generate with input_ids (token in, token out)
+            response = await self.router.client.post(
+                f"{worker_url}/generate",
+                json={
+                    "input_ids": token_ids,
+                    "sampling_params": sampling_params,
+                    "return_logprob": False,
+                    "return_text_in_logprobs": False,
+                },
+                timeout=httpx.Timeout(60.0)
+            )
+            response.raise_for_status()
+            generate_data = response.json()
+
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=504,
+                detail="Request timeout while calling SGLang worker"
+            )
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"SGLang worker error: {e.response.text}"
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to connect to SGLang worker: {str(e)}"
+            )
+        finally:
+            await self.router._finish_url(worker_url)
+
+        # Extract generated text and token information
+        generated_text = generate_data.get("text", "")
+        output_ids = generate_data.get("meta_info", {}).get("output_token_ids", [])
+
+        # Maintain radix cache: insert full sequence (input + output)
+        if output_ids:
+            try:
+                # Combine input and output tokens for cache insertion
+                full_text = input_text + generated_text
+                await radix_tree.insert_async(full_text, token_ids + output_ids)
+            except Exception as e:
+                if getattr(self.args, 'verbose', False):
+                    print(f"[slime-router] Warning: Failed to update radix cache: {e}")
+
+        # Calculate token usage
+        prompt_tokens = len(token_ids)
+        completion_tokens = len(output_ids) if output_ids else len(generated_text.split())
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Parse output with SGLang parsers (reasoning + tool calls)
+        final_text, tool_calls, reasoning_text = self._parse_generated_output(
+            generated_text,
+            request_data
+        )
+
+        # Build message content
+        message_content = {
+            "role": "assistant",
+            "content": final_text
+        }
+
+        # Add tool_calls if present
+        if tool_calls:
+            message_content["tool_calls"] = tool_calls
+
+        # Optionally include reasoning in metadata (non-standard, for debugging)
+        if reasoning_text and getattr(self.args, 'include_reasoning_in_response', False):
+            message_content["reasoning"] = reasoning_text
+
+        # Convert to OpenAI format
+        openai_response = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": getattr(self.args, 'model_name', 'slime-model'),
+            "choices": [{
+                "index": 0,
+                "message": message_content,
+                "finish_reason": "tool_calls" if tool_calls else "stop"
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
+            }
+        }
+
+        return JSONResponse(content=openai_response)
+
+    async def _stream_generate_with_cache(
+        self, token_ids: list, sampling_params: dict, radix_tree, input_text: str
+    ):
+        """
+        Streaming generation with direct SGLang call and cache maintenance.
+
+        This method implements the cache-enabled streaming path without internal HTTP:
+        1. Call SGLang /generate with streaming
+        2. Stream chunks to client in OpenAI format
+        3. Maintain radix cache with final output tokens
+
+        TODO: Integrate streaming parsers for incremental parsing
+        - Use ReasoningParser.parse_stream_chunk() for reasoning content
+        - Use FunctionCallParser.parse_stream_chunk() for tool calls
+        - This requires buffering and state management for partial tags
+
+        Args:
+            token_ids: Input token IDs from radix cache
+            sampling_params: Sampling parameters for generation
+            radix_tree: RadixTree instance for cache maintenance
+            input_text: Original input text (for cache maintenance)
+
+        Returns:
+            StreamingResponse: OpenAI-formatted SSE stream
+        """
         async def generate_openai_chunks():
             """Generate OpenAI-formatted SSE chunks."""
             request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
             created_time = int(time.time())
 
-            response = None
-            try:
-                # Send to router's /generate endpoint
-                response = await self.router.client.stream(
-                    "POST",
-                    router_url,
-                    json=generate_request,
-                    timeout=None
-                )
+            # Get a worker URL
+            worker_url = await self.router._use_url()
+            accumulated_text = ""
+            accumulated_tokens = []
 
-                async with response:
-                    accumulated_text = ""
+            # TODO: Initialize streaming parsers here if needed
+            # streaming_reasoning_parser = ...
+            # streaming_function_parser = ...
+
+            try:
+                # Call SGLang /generate with streaming
+                async with self.router.client.stream(
+                    "POST",
+                    f"{worker_url}/generate",
+                    json={
+                        "input_ids": token_ids,
+                        "sampling_params": {**sampling_params, "stream": True},
+                        "return_logprob": False,
+                    },
+                    timeout=None
+                ) as response:
+                    response.raise_for_status()
 
                     async for line in response.aiter_lines():
                         if line.strip() and line.startswith("data: "):
@@ -490,8 +716,10 @@ class ChatCompletionHandler:
 
                             try:
                                 chunk = json.loads(chunk_data)
-                                if chunk.get("text"):
-                                    accumulated_text += chunk.get("text", "")
+                                text_delta = chunk.get("text", "")
+
+                                if text_delta:
+                                    accumulated_text += text_delta
 
                                     # OpenAI format chunk
                                     openai_chunk = {
@@ -502,36 +730,48 @@ class ChatCompletionHandler:
                                         "choices": [{
                                             "index": 0,
                                             "delta": {
-                                                "content": chunk.get("text", "")
+                                                "content": text_delta
                                             },
                                             "finish_reason": None
                                         }]
                                     }
                                     yield f"data: {json.dumps(openai_chunk)}\n\n"
+
+                                # Collect output tokens for cache maintenance
+                                if "meta_info" in chunk and "output_token_ids" in chunk["meta_info"]:
+                                    accumulated_tokens.extend(chunk["meta_info"]["output_token_ids"])
+
                             except json.JSONDecodeError:
                                 continue
 
-                    # Final chunk
-                    final_chunk = {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_time,
-                        "model": getattr(self.args, 'model_name', 'slime-model'),
-                        "choices": [{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop"
-                        }]
-                    }
-                    yield f"data: {json.dumps(final_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
+                # Final chunk
+                final_chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": getattr(self.args, 'model_name', 'slime-model'),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+                # Maintain radix cache after streaming completes
+                if accumulated_tokens:
+                    try:
+                        full_text = input_text + accumulated_text
+                        await radix_tree.insert_async(full_text, token_ids + accumulated_tokens)
+                    except Exception as e:
+                        if getattr(self.args, 'verbose', False):
+                            print(f"[slime-router] Warning: Failed to update radix cache: {e}")
 
             except Exception as e:
-                # Log error but ensure connection is closed
                 if getattr(self.args, 'verbose', False):
                     print(f"[slime-router] Streaming error: {e}")
 
-                # Send error chunk to client
                 error_chunk = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
@@ -549,115 +789,16 @@ class ChatCompletionHandler:
                 }
                 yield f"data: {json.dumps(error_chunk)}\n\n"
                 yield "data: [DONE]\n\n"
-
-                # Re-raise to let FastAPI handle the error appropriately
                 raise
             finally:
-                # Ensure response is closed if it was opened
-                if response is not None:
-                    try:
-                        await response.aclose()
-                    except Exception:
-                        pass  # Ignore cleanup errors
+                await self.router._finish_url(worker_url)
 
         return StreamingResponse(
             generate_openai_chunks(),
-            media_type="text/plain",
+            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"}
         )
 
-    async def _non_stream_generate_response(self, generate_request: dict):
-        """
-        Handle non-streaming generate response and convert to OpenAI chat.completion format.
-
-        This method:
-        1. Sends request to router's /generate endpoint (processed by RadixTreeMiddleware)
-        2. Processes SGLang's JSON response
-        3. Extracts accurate token counts from SGLang response
-        4. Converts to OpenAI-compatible chat.completion format
-        5. Provides proper error handling and timeout management
-
-        Args:
-            generate_request: Generate API request with input_tokens and sampling_params
-
-        Returns:
-            JSONResponse: OpenAI-formatted chat.completion response with accurate token usage
-
-        Raises:
-            HTTPException: Various error conditions (timeout, connection issues, etc.)
-        """
-        # Send to router's /generate endpoint
-        port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
-        router_url = f"http://localhost:{port}/generate"
-
-        try:
-            response = await self.router.client.post(
-                router_url,
-                json=generate_request,
-                timeout=httpx.Timeout(30.0)  # 30 second timeout
-            )
-            response.raise_for_status()
-        except httpx.TimeoutException:
-            raise HTTPException(
-                status_code=504,
-                detail="Request timeout while calling generate endpoint"
-            )
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=e.response.status_code,
-                detail=f"Generate endpoint error: {e.response.text}"
-            )
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Failed to connect to generate endpoint: {str(e)}"
-            )
-
-        try:
-            generate_data = response.json()
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Invalid JSON response from generate endpoint: {str(e)}"
-            )
-        generated_text = generate_data.get("text", "")
-
-        # Calculate accurate token counts from SGLang response
-        prompt_tokens = len(generate_request["input_tokens"]) if generate_request.get("input_tokens") else 0
-
-        # Use actual token counts from SGLang response if available
-        if "output_ids" in generate_data:
-            completion_tokens = len(generate_data["output_ids"])
-        elif "meta_info" in generate_data and "output_token_logprobs" in generate_data["meta_info"]:
-            completion_tokens = len(generate_data["meta_info"]["output_token_logprobs"])
-        else:
-            # Fallback to text-based estimation (less accurate)
-            completion_tokens = len(generated_text.split()) if generated_text else 0
-
-        total_tokens = prompt_tokens + completion_tokens
-
-        # Convert to OpenAI format
-        openai_response = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": getattr(self.args, 'model_name', 'slime-model'),
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": generated_text
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens
-            }
-        }
-
-        return JSONResponse(content=openai_response)
 
 
 # Factory function for creating ChatCompletion handlers

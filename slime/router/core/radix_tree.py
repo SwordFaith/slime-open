@@ -396,7 +396,7 @@ class StringRadixTrie:
             result = self._insert(text, token_ids, logp, loss_mask, current_weight_version)
 
             # Check if GC should be triggered after insert
-            if self.cur_cache_size > self.max_cache_size and weight_version is not None:
+            if self.cur_cache_size >= self.max_cache_size and weight_version is not None:
                 if self.verbose:
                     print(
                         f"[RadixTree] Cache size {self.cur_cache_size} exceeds limit {self.max_cache_size}, triggering GC"
@@ -404,6 +404,14 @@ class StringRadixTrie:
                 gc_removed = self.gc_by_weight_version(weight_version)
                 if self.verbose:
                     print(f"[RadixTree] GC removed {gc_removed} nodes, new cache size: {self.cur_cache_size}")
+
+                # Fallback: If weight_version-based GC didn't free enough space, use LRU eviction
+                if self.cur_cache_size > self.max_cache_size:
+                    if self.verbose:
+                        print(f"[RadixTree] GC insufficient, triggering LRU eviction to reach {self.max_cache_size}")
+                    lru_removed = self._evict_by_lru(self.max_cache_size)
+                    if self.verbose:
+                        print(f"[RadixTree] LRU eviction removed {lru_removed} nodes, final cache size: {self.cur_cache_size}")
 
             # Print tree structure if verbose is enabled
             if self.verbose:
@@ -498,7 +506,7 @@ class StringRadixTrie:
         result = self._insert(text, token_ids, logp, loss_mask, current_weight_version)
 
         # Check if GC should be triggered after insert (only if trigger_gc is True)
-        if self.cur_cache_size > self.max_cache_size and weight_version is not None:
+        if self.cur_cache_size >= self.max_cache_size and weight_version is not None:
             if self.verbose:
                 print(
                     f"[RadixTree] Cache size {self.cur_cache_size} exceeds limit {self.max_cache_size}, triggering GC"
@@ -506,6 +514,14 @@ class StringRadixTrie:
             gc_removed = self.gc_by_weight_version(weight_version)
             if self.verbose:
                 print(f"[RadixTree] GC removed {gc_removed} nodes, new cache size: {self.cur_cache_size}")
+
+            # Fallback: If weight_version-based GC didn't free enough space, use LRU eviction
+            if self.cur_cache_size > self.max_cache_size:
+                if self.verbose:
+                    print(f"[RadixTree] GC insufficient, triggering LRU eviction to reach {self.max_cache_size}")
+                lru_removed = self._evict_by_lru(self.max_cache_size)
+                if self.verbose:
+                    print(f"[RadixTree] LRU eviction removed {lru_removed} nodes, final cache size: {self.cur_cache_size}")
 
         # Print tree structure if verbose is enabled
         if self.verbose:
@@ -815,7 +831,7 @@ class StringRadixTrie:
                 return
 
             # Check if this node should be removed (based on traverse_version, not weight_version)
-            if node.traverse_version is not None and node.traverse_version <= gc_threshold and node.has_value:
+            if node.traverse_version is not None and node.traverse_version < gc_threshold and node.has_value:
                 outdated_nodes.append(node)
                 return  # Don't check children since entire subtree will be removed
 
@@ -825,6 +841,55 @@ class StringRadixTrie:
 
         check_node(self.root)
         return outdated_nodes
+
+    def _evict_by_lru(self, target_size: int) -> int:
+        """
+        Fallback LRU eviction when weight_version-based GC is insufficient.
+        Removes least recently used nodes until cache size <= target_size.
+
+        Args:
+            target_size: Target cache size to achieve
+        Returns:
+            Number of nodes removed
+        """
+        if self.cur_cache_size <= target_size:
+            return 0
+
+        # Collect all evictable nodes
+        evictable_nodes = []
+
+        def collect_evictable(node):
+            if node == self.root:
+                # Root is never evictable, check its children
+                for child in node.children:
+                    collect_evictable(child)
+                return
+
+            # Check if this node is evictable
+            if node.is_evictable:
+                evictable_nodes.append(node)
+
+            # Recursively check children
+            for child in node.children:
+                collect_evictable(child)
+
+        collect_evictable(self.root)
+
+        # Sort by last_access_time (least recently used first)
+        evictable_nodes.sort(key=lambda n: n.last_access_time)
+
+        # Remove nodes until we reach target size
+        removed_count = 0
+        for node in evictable_nodes:
+            if self.cur_cache_size <= target_size:
+                break
+
+            removed_count += self._clean_node_subtree(node)
+
+            if self.verbose:
+                print(f"[RadixTree LRU] Evicted node, removed {removed_count} total, cache_size now: {self.cur_cache_size}")
+
+        return removed_count
 
     def _validate_subtree_traverse_versions(self, node: StringTreeNode):
         """
