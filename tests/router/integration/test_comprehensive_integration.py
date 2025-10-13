@@ -266,8 +266,10 @@ class TestComprehensiveIntegration:
             await async_trie.insert_async(text, tokens, logp, loss_mask, weight_version)
 
         # Test GC by version
-        sync_removed = sync_trie.gc_by_weight_version(1)
-        async_removed = await async_trie.gc_by_weight_version_async(1)
+        # gc_by_weight_version(7) removes nodes with traverse_version < (7 - gc_threshold_k=5) = 2
+        # This will remove version 1 nodes (old1, old2) but keep version 2 and 3 nodes
+        sync_removed = sync_trie.gc_by_weight_version(7)
+        async_removed = await async_trie.gc_by_weight_version_async(7)
 
         # Verify consistency
         consistent = (sync_removed == async_removed and

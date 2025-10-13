@@ -75,7 +75,7 @@ class TestVersionConsistency:
 
         # Test inserting empty data
         success = trie.insert("", [1, 2], [0.1, 0.2], [1, 1], 1)
-        assert success, "Should be able to insert empty string with tokens"
+        assert not success, "Should NOT be able to insert empty string (radix tree design)"
 
         success = trie.insert("test", [], [], [], 1)
         assert not success, "Should not be able to insert non-empty string with empty tokens"
@@ -111,7 +111,7 @@ class TestVersionConsistency:
         """Test sync version GC logic with traverse_version."""
         print("🔥 测试同步版本GC逻辑（traverse_version）")
 
-        trie = StringRadixTrie(max_cache_size=20, gc_threshold_k=1, tokenizer=self.tokenizer, verbose=False)
+        trie = StringRadixTrie(max_cache_size=20, gc_threshold_k=2, tokenizer=self.tokenizer, verbose=False)
 
         # Create complex version hierarchy
         # Version 1 data
@@ -133,7 +133,7 @@ class TestVersionConsistency:
             trie.insert(text, tokens, logp, loss_mask, weight_version)
         assert trie.total_entries == 4, "Should have 4 entries after version 5 insertion"
 
-        # Trigger GC, should clean traverse_version < (5 - 1) = 4 nodes
+        # Trigger GC, should clean traverse_version < (5 - 2) = 3 nodes
         removed = trie.gc_by_weight_version(5)
         assert isinstance(removed, int), "GC should return integer count"
         assert removed >= 0, "GC should remove non-negative count"
@@ -159,8 +159,8 @@ class TestVersionConsistency:
         # Test basic consistency
         test_data = [
             ("test_consistency", [1, 2, 3], [0.1, 0.2, 0.3], [1, 1, 1], 2),
-            ("empty_test", [], [], [], [], None),
-            ("error_test", "test", [], [], [], 1),  # This will be filtered out in actual implementation
+            ("empty_test", [], [], [], None),
+            ("error_test", "test", [], [], 1),  # This will be filtered out in actual implementation
         ]
 
         for text, tokens, logp, loss_mask, weight_version in test_data:

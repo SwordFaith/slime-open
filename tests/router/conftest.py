@@ -47,7 +47,7 @@ def mock_sglang_response():
 @pytest.fixture
 def sample_radix_tree():
     """Create a sample radix tree for testing."""
-    from slime.router.middleware_hub.radix_tree import StringRadixTrie
+    from slime.router.core.radix_tree import StringRadixTrie
 
     tree = StringRadixTrie()
     # Pre-populate with some test data
@@ -120,7 +120,7 @@ def qwen_tokenizer(tokenizer_model_path):
 @pytest.fixture
 def real_radix_tree(flexible_tokenizer):
     """Create a StringRadixTrie instance with mock tokenizer."""
-    from slime.router.middleware_hub.radix_tree import StringRadixTrie
+    from slime.router.core.radix_tree import StringRadixTrie
     return StringRadixTrie(
         max_cache_size=1000,
         tokenizer=flexible_tokenizer,
@@ -134,7 +134,7 @@ def simple_middleware(flexible_tokenizer, real_radix_tree):
     Create a simplified RadixTreeMiddleware for testing.
     Uses mock tokenizer and radix tree for stable testing.
     """
-    from slime.router.middleware_hub.radix_tree_middleware import RadixTreeMiddleware
+    from slime.router.middleware.radix_tree_middleware import RadixTreeMiddleware
     from unittest.mock import Mock
 
     mock_router = Mock()

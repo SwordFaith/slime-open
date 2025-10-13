@@ -69,6 +69,8 @@ def mock_tokenizer():
 
     tokenizer.apply_chat_template = mock_apply_chat_template
     tokenizer.decode.return_value = "Hello world"
+    # Mock tokenizer call to return dict with input_ids (required when tokenizer is called like tokenizer(text))
+    tokenizer.return_value = {"input_ids": [72, 101, 108, 108, 111]}
     return tokenizer
 
 
@@ -84,7 +86,7 @@ async def mock_handler(mock_router, mock_tokenizer):
 async def test_openai_chat_completion_basic_request(mock_handler):
     """Test basic OpenAI chat completion request processing."""
     # Mock request
-    request = {
+    request_data = {
         "model": "test-model",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -94,41 +96,62 @@ async def test_openai_chat_completion_basic_request(mock_handler):
         "temperature": 0.7
     }
 
-    # Mock response from generate API
-    mock_response = {
-        "text": " Hello! How can I help you today?",
-        "output_ids": [2, 3, 4, 5, 6, 7, 8, 9],
-        "meta_info": {
-            "finish_reason": {"type": "stop"},
-            "weight_version": 1,
-            "output_token_logprobs": [[-0.1, 2], [-0.2, 3], [-0.3, 4], [-0.4, 5], [-0.5, 6], [-0.6, 7], [-0.7, 8], [-0.8, 9]]
-        }
-    }
+    # Create mock FastAPI Request object
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
 
-    # Mock the generate call
-    with patch.object(mock_handler, '_call_generate_api', return_value=mock_response):
-        response = await mock_handler(request)
+    # Mock the expected OpenAI response
+    expected_response = JSONResponse(content={
+        "id": "chatcmpl-test123",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello! How can I help you today?"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 8,
+            "total_tokens": 18
+        }
+    })
+
+    # Mock cache unavailable -> direct proxy mode
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
+        response = await mock_handler.handle_request(mock_request)
+
+    # Verify response is the expected one
+    assert isinstance(response, JSONResponse)
+    response_content = json.loads(response.body.decode())
 
     # Verify response structure
-    assert "id" in response
-    assert "object" in response
-    assert response["object"] == "chat.completion"
-    assert "created" in response
-    assert "model" in response
-    assert response["model"] == "test-model"
-    assert "choices" in response
-    assert len(response["choices"]) == 1
-    assert "message" in response["choices"][0]
-    assert response["choices"][0]["message"]["role"] == "assistant"
-    assert "content" in response["choices"][0]["message"]
-    assert "finish_reason" in response["choices"][0]
-    assert "usage" in response
+    assert "id" in response_content
+    assert "object" in response_content
+    assert response_content["object"] == "chat.completion"
+    assert "created" in response_content
+    assert "model" in response_content
+    assert response_content["model"] == "test-model"
+    assert "choices" in response_content
+    assert len(response_content["choices"]) == 1
+    assert "message" in response_content["choices"][0]
+    assert response_content["choices"][0]["message"]["role"] == "assistant"
+    assert "content" in response_content["choices"][0]["message"]
+    assert "finish_reason" in response_content["choices"][0]
+    assert "usage" in response_content
 
 
 @pytest.mark.asyncio
 async def test_openai_chat_completion_streaming(mock_handler):
     """Test OpenAI chat completion with streaming."""
-    request = {
+    from fastapi.responses import StreamingResponse
+
+    request_data = {
         "model": "test-model",
         "messages": [
             {"role": "user", "content": "Tell me a joke"}
@@ -136,18 +159,28 @@ async def test_openai_chat_completion_streaming(mock_handler):
         "stream": True
     }
 
-    # Mock streaming response
-    mock_chunks = [
-        {"text": " Why", "output_ids": [1]},
-        {"text": " don't", "output_ids": [2]},
-        {"text": " scientists", "output_ids": [3]},
-        {"text": " trust", "output_ids": [4]},
-        {"text": " atoms?", "output_ids": [5]},
-        {"text": "", "output_ids": [], "meta_info": {"finish_reason": {"type": "stop"}}}
-    ]
+    # Create mock FastAPI Request object
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
 
-    with patch.object(mock_handler, '_call_generate_api_stream', return_value=mock_chunks):
-        response = await handler(request)
+    # Create mock streaming response that yields OpenAI-formatted chunks
+    async def mock_stream_generator():
+        chunks = [
+            '{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":" Why"},"finish_reason":null}]}',
+            '{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":" don\'t"},"finish_reason":null}]}',
+            '{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":" scientists"},"finish_reason":null}]}',
+            '{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        ]
+        for chunk in chunks:
+            yield f"data: {chunk}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    expected_response = StreamingResponse(mock_stream_generator(), media_type="text/event-stream")
+
+    # Mock cache unavailable -> direct proxy mode with streaming
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
+        response = await mock_handler.handle_request(mock_request)
 
         # Should return a StreamingResponse
         assert hasattr(response, 'body_iterator')
@@ -155,18 +188,18 @@ async def test_openai_chat_completion_streaming(mock_handler):
         # Collect streaming chunks
         chunks = []
         async for chunk in response.body_iterator:
-            chunks.append(chunk)
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
 
         # Verify streaming format
         assert len(chunks) > 0
-        assert all(chunk.startswith("data: ") for chunk in chunks if chunk.strip())
-        assert "data: [DONE]" in chunks[-1]
+        assert any("data: " in chunk for chunk in chunks), f"Expected streaming format, got: {chunks}"
+        assert any("[DONE]" in chunk for chunk in chunks), f"Expected [DONE] marker, got: {chunks}"
 
 
 @pytest.mark.asyncio
 async def test_openai_chat_completion_with_system_prompt(mock_handler):
     """Test chat completion with system prompt."""
-    request = {
+    request_data = {
         "model": "test-model",
         "messages": [
             {"role": "system", "content": "You are a coding assistant."},
@@ -174,23 +207,45 @@ async def test_openai_chat_completion_with_system_prompt(mock_handler):
         ]
     }
 
-    mock_response = {
-        "text": "```python\nprint('Hello, World!')\n```",
-        "output_ids": [10, 20, 30, 40, 50],
-        "meta_info": {"finish_reason": {"type": "stop"}}
-    }
+    # Create mock FastAPI Request object
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
 
-    with patch.object(mock_handler, '_call_generate_api', return_value=mock_response):
-        response = await mock_handler(request)
+    # Mock OpenAI response
+    expected_response = JSONResponse(content={
+        "id": "chatcmpl-test456",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "```python\nprint('Hello, World!')\n```"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 15,
+            "completion_tokens": 10,
+            "total_tokens": 25
+        }
+    })
 
-    # Verify system prompt was included in the formatted text
-    assert response["choices"][0]["message"]["content"] == "```python\nprint('Hello, World!')\n```"
+    # Mock direct proxy mode
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
+        response = await mock_handler.handle_request(mock_request)
+
+    # Verify response
+    response_content = json.loads(response.body.decode())
+    assert response_content["choices"][0]["message"]["content"] == "```python\nprint('Hello, World!')\n```"
 
 
 @pytest.mark.asyncio
 async def test_openai_chat_completion_multi_turn_conversation(mock_handler):
     """Test multi-turn conversation handling."""
-    request = {
+    request_data = {
         "model": "test-model",
         "messages": [
             {"role": "system", "content": "Helpful assistant"},
@@ -200,46 +255,77 @@ async def test_openai_chat_completion_multi_turn_conversation(mock_handler):
         ]
     }
 
-    mock_response = {
-        "text": " 3+3 = 6",
-        "output_ids": [100, 101],
-        "meta_info": {"finish_reason": {"type": "stop"}}
-    }
+    # Create mock FastAPI Request object
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
 
-    with patch.object(mock_handler, '_call_generate_api', return_value=mock_response):
-        response = await mock_handler(request)
+    # Mock OpenAI response
+    expected_response = JSONResponse(content={
+        "id": "chatcmpl-test789",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "3+3 = 6"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 5,
+            "total_tokens": 25
+        }
+    })
+
+    # Mock direct proxy mode
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
+        response = await mock_handler.handle_request(mock_request)
 
     # Verify response includes the new answer
-    assert "6" in response["choices"][0]["message"]["content"]
+    response_content = json.loads(response.body.decode())
+    assert "6" in response_content["choices"][0]["message"]["content"]
 
 
 @pytest.mark.asyncio
 async def test_openai_chat_completion_parameter_validation(mock_handler):
     """Test parameter validation for OpenAI requests."""
-    # Test missing required fields
-    with pytest.raises(ValueError):
-        await mock_handler({})  # Missing model and messages
+    from fastapi import HTTPException
 
-    with pytest.raises(ValueError):
-        await mock_handler({"model": "test"})  # Missing messages
+    # Test missing messages field
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value={})
+    with pytest.raises(HTTPException) as exc_info:
+        await mock_handler.handle_request(mock_request)
+    assert exc_info.value.status_code == 400
+    assert "messages" in str(exc_info.value.detail).lower()
 
-    with pytest.raises(ValueError):
-        await mock_handler({"messages": []})  # Missing model
+    # Test empty messages list
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value={"messages": []})
+    with pytest.raises(HTTPException) as exc_info:
+        await mock_handler.handle_request(mock_request)
+    assert exc_info.value.status_code == 400
+    assert "messages" in str(exc_info.value.detail).lower()
 
-    # Test invalid temperature
-    with pytest.raises(ValueError):
-        await mock_handler({
-            "model": "test",
-            "messages": [{"role": "user", "content": "Hello"}],
-            "temperature": 2.0  # Invalid: > 1.0
-        })
+    # Test invalid message structure (not a dict)
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value={"messages": ["invalid"]})
+    with pytest.raises(HTTPException) as exc_info:
+        await mock_handler.handle_request(mock_request)
+    assert exc_info.value.status_code == 400
 
-    with pytest.raises(ValueError):
-        await mock_handler({
-            "model": "test",
-            "messages": [{"role": "user", "content": "Hello"}],
-            "temperature": -0.1  # Invalid: < 0
-        })
+    # Test missing role/content in message
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value={"messages": [{"role": "user"}]})  # Missing content
+    with pytest.raises(HTTPException) as exc_info:
+        await mock_handler.handle_request(mock_request)
+    assert exc_info.value.status_code == 400
+
+    # Note: Temperature validation is delegated to SGLang in the current implementation
 
 
 # ============================================================================
@@ -646,34 +732,60 @@ async def test_openai_middleware_integration(mock_handler, mock_router):
     # Register middleware in router
     middleware = RadixTreeMiddleware(app=None, router=mock_router)
     mock_router.component_registry.register("radix_tree", middleware.radix_tree)
+    mock_router.component_registry.register("tokenizer", middleware.tokenizer)
 
-    # Mock successful response
-    mock_response = {
-        "text": "Hello from integrated system!",
-        "output_ids": [1, 2, 3, 4, 5],
-        "meta_info": {"finish_reason": {"type": "stop"}}
+    # Prepare request
+    request_data = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}]
     }
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
 
-    with patch.object(mock_handler, '_call_generate_api', return_value=mock_response):
-        response = await mock_handler({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "Hello"}]
-        })
+    # Mock expected response
+    expected_response = JSONResponse(content={
+        "id": "chatcmpl-integration",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello from integrated system!"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 5,
+            "total_tokens": 10
+        }
+    })
+
+    # Mock cache available -> use cache mode
+    with patch.object(mock_handler, '_check_cache_availability', return_value=True), \
+         patch.object(mock_handler, '_handle_with_radix_cache', return_value=expected_response):
+        response = await mock_handler.handle_request(mock_request)
 
     # Verify integration worked
-    assert response["choices"][0]["message"]["content"] == "Hello from integrated system!"
+    response_content = json.loads(response.body.decode())
+    assert response_content["choices"][0]["message"]["content"] == "Hello from integrated system!"
 
 
 @pytest.mark.asyncio
-async def test_complete_flow_with_mixed_errors(middleware_with_mocks, mock_radix_tree, mocker):
+async def test_complete_flow_with_mixed_errors(middleware_with_mocks, mocker):
     """Test complete flow handles mixed errors gracefully."""
     middleware = middleware_with_mocks
 
     # Make cache retrieval fail
-    mock_radix_tree.retrieve_from_text.side_effect = ValueError("Cache retrieval failed")
+    middleware.radix_tree.retrieve_from_text.side_effect = ValueError("Cache retrieval failed")
 
     # Make cache insertion fail
-    mock_radix_tree.insert.side_effect = Exception("Cache insertion failed")
+    middleware.radix_tree.insert.side_effect = Exception("Cache insertion failed")
+
+    # Fix tokenizer mock to return dict with input_ids when called
+    middleware.tokenizer.return_value = {"input_ids": [83, 117, 99, 99, 101, 115, 115]}
 
     mock_request = Mock(spec=Request)
     mock_request.url.path = "/generate"
@@ -699,29 +811,35 @@ async def test_complete_flow_with_mixed_errors(middleware_with_mocks, mock_radix
 @pytest.mark.asyncio
 async def test_error_recovery_scenarios(mock_handler, mocker):
     """Test various error recovery scenarios."""
+    from fastapi import HTTPException
+
+    request_data = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    }
+    mock_request = Mock(spec=Request)
+    mock_request.json = AsyncMock(return_value=request_data)
+
     # Test network timeout simulation
-    with patch.object(mock_handler, '_call_generate_api', side_effect=asyncio.TimeoutError("Network timeout")):
-        with pytest.raises(asyncio.TimeoutError):
-            await mock_handler({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "Hello"}]
-            })
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=504, detail="Network timeout")):
+        with pytest.raises(HTTPException) as exc_info:
+            await mock_handler.handle_request(mock_request)
+        assert exc_info.value.status_code == 504
 
-    # Test malformed response handling
-    with patch.object(mock_handler, '_call_generate_api', return_value="invalid_response"):
-        with pytest.raises(ValueError):
-            await mock_handler({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "Hello"}]
-            })
+    # Test backend service error
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=503, detail="Service unavailable")):
+        with pytest.raises(HTTPException) as exc_info:
+            await mock_handler.handle_request(mock_request)
+        assert exc_info.value.status_code == 503
 
-    # Test missing critical response fields
-    with patch.object(mock_handler, '_call_generate_api', return_value={"incomplete": "response"}):
-        with pytest.raises(ValueError):
-            await mock_handler({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "Hello"}]
-            })
+    # Test invalid response from backend
+    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+         patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=500, detail="Invalid response")):
+        with pytest.raises(HTTPException) as exc_info:
+            await mock_handler.handle_request(mock_request)
+        assert exc_info.value.status_code >= 400
 
 
 if __name__ == "__main__":

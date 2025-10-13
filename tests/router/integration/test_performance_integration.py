@@ -217,14 +217,14 @@ class TestPerformanceIntegration:
 
         # Verify memory usage consistency
         assert sync_stats['total_entries'] == async_stats['total_entries'], "Total entries should match"
-        assert sync_stats['cache_size'] == async_stats['cache_size'], "Cache sizes should match"
+        assert sync_stats['cur_cache_size'] == async_stats['cur_cache_size'], "Cache sizes should match"
 
         # Memory usage should be reasonable (within reasonable bounds)
-        assert sync_stats['cache_size'] <= sync_trie.max_cache_size * 2, "Sync cache size should be reasonable"
-        assert async_stats['cache_size'] <= async_trie.max_cache_size * 2, "Async cache size should be reasonable"
+        assert sync_stats['cur_cache_size'] <= sync_trie.max_cache_size * 2, "Sync cache size should be reasonable"
+        assert async_stats['cur_cache_size'] <= async_trie.max_cache_size * 2, "Async cache size should be reasonable"
 
-        print(f"   Sync memory: {sync_stats['cache_size']} cache, {sync_stats['total_entries']} entries")
-        print(f"   Async memory: {async_stats['cache_size']} cache, {async_stats['total_entries']} entries")
+        print(f"   Sync memory: {sync_stats['cur_cache_size']} cache, {sync_stats['total_entries']} entries")
+        print(f"   Async memory: {async_stats['cur_cache_size']} cache, {async_stats['total_entries']} entries")
 
     @pytest.mark.asyncio
     async def test_gc_performance_consistency(self):

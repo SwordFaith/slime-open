@@ -36,6 +36,13 @@ def mock_router():
     router.args = MagicMock()
     router.args.hf_checkpoint = "test_models/Qwen3-0.6B"
     router.verbose = False
+
+    # Mock component_registry to return False for has() calls
+    # This ensures middleware creates new instances using our patched StringRadixTrie
+    mock_registry = MagicMock()
+    mock_registry.has.return_value = False
+    router.get_component_registry.return_value = mock_registry
+
     return router
 
 
@@ -49,21 +56,23 @@ def mock_app():
 def middleware(mock_app, mock_router, mocker):
     """Create RadixTreeMiddleware with mocked dependencies."""
     # Mock AutoTokenizer to avoid loading real model
-    mock_tokenizer_class = mocker.patch("slime.router.middleware_hub.radix_tree_middleware.AutoTokenizer")
+    mock_tokenizer_class = mocker.patch("slime.router.middleware.radix_tree_middleware.AutoTokenizer")
     mock_tokenizer = MagicMock()
     mock_tokenizer.decode.return_value = "User: Hello"
     mock_tokenizer.return_value = {"input_ids": [72, 101, 108, 108, 111]}
     mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
 
     # Mock StringRadixTrie
-    mock_trie_class = mocker.patch("slime.router.middleware_hub.radix_tree_middleware.StringRadixTrie")
+    mock_trie_class = mocker.patch("slime.router.middleware.radix_tree_middleware.StringRadixTrie")
     mock_trie = MagicMock(spec=StringRadixTrie)
-    mock_trie.retrieve_from_text.return_value = (
+    # Mock get_or_create_tokenization_async (returns 4 values: tokens, logprobs, loss_mask, versions)
+    mock_trie.get_or_create_tokenization_async = AsyncMock(return_value=(
         [72, 101, 108, 108, 111],  # input_tokens
         [0.1, 0.1, 0.1, 0.1, 0.1],  # input_logprobs
         [0, 0, 0, 0, 0],  # input_loss_mask
-    )
-    mock_trie.insert.return_value = True
+        [-1, -1, -1, -1, -1],  # generation_versions (non-AI-generated)
+    ))
+    mock_trie.insert_async = AsyncMock(return_value=True)
     mock_trie_class.return_value = mock_trie
 
     middleware = RadixTreeMiddleware(mock_app, router=mock_router)
@@ -217,8 +226,8 @@ async def test_cache_insertion_after_generation(middleware, mock_request, mocker
     success_response = create_sglang_response(generated_text, finish_reason="stop", weight_version=5)
     mock_call_next = AsyncMock(return_value=success_response)
 
-    # Spy on radix_tree.insert to verify it's called
-    insert_spy = mocker.spy(middleware.radix_tree, "insert")
+    # Spy on radix_tree.insert_async to verify it's called (middleware uses async version)
+    insert_spy = mocker.spy(middleware.radix_tree, "insert_async")
 
     # Execute
     response = await middleware.dispatch(mock_request, mock_call_next)

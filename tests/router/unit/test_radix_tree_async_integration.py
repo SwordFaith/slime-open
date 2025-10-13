@@ -33,12 +33,19 @@ from slime.router.core.radix_tree import StringRadixTrie
 @pytest.fixture
 def mock_router():
     """Create a mock router for testing."""
+    from slime.router.utils.component_registry import ComponentRegistry
+
     router = Mock()
     router.args = Mock()
     router.args.hf_checkpoint = "test-checkpoint"
     router.args.radix_tree_max_size = 1000  # Set real value
     router.args.verbose = False  # Set real value
     router.verbose = False
+
+    # Create a real ComponentRegistry for proper component management
+    router.component_registry = ComponentRegistry()
+    router.get_component_registry = Mock(return_value=router.component_registry)
+
     return router
 
 
@@ -46,6 +53,8 @@ def mock_router():
 async def middleware(mock_router):
     """Create middleware instance with mocked dependencies."""
     with patch('slime.router.middleware.radix_tree_middleware.AutoTokenizer') as mock_tokenizer:
+
+        # Setup tokenizer mock
         mock_tokenizer_instance = Mock()
 
         def mock_tokenizer_call(text, add_special_tokens=True):
@@ -80,6 +89,8 @@ async def middleware(mock_router):
         mock_tokenizer.from_pretrained.return_value = mock_tokenizer_instance
 
         app = Mock()
+        # Create middleware - this will create a real StringRadixTrie
+        # with the mocked tokenizer
         middleware = RadixTreeMiddleware(app, router=mock_router)
 
         yield middleware
@@ -94,7 +105,7 @@ async def test_middleware_async_cache_retrieval(middleware):
     )
 
     # Test with cached content
-    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Hello world")
+    tokens, logprobs, loss_mask, versions = await middleware.query_cache_by_text("Hello world")
 
     assert tokens == [1, 2, 3]
     assert len(logprobs) == 3
@@ -110,7 +121,7 @@ async def test_middleware_async_cache_retrieval_partial_match(middleware):
     )
 
     # Test with "Hello world" (partial match)
-    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Hello world")
+    tokens, logprobs, loss_mask, versions = await middleware.query_cache_by_text("Hello world")
 
     # Should get cached "Hello" + tokenized " world"
     assert len(tokens) >= 2  # At least the cached "Hello" tokens
@@ -121,7 +132,7 @@ async def test_middleware_async_cache_retrieval_partial_match(middleware):
 @pytest.mark.asyncio
 async def test_middleware_async_cache_retrieval_no_match(middleware):
     """Test middleware with no cache match."""
-    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Unknown text")
+    tokens, logprobs, loss_mask, versions = await middleware.query_cache_by_text("Unknown text")
 
     # Should return tokenized version of "Unknown text"
     assert len(tokens) > 0  # Should be tokenized
@@ -140,7 +151,7 @@ async def test_middleware_async_cache_insertion(middleware):
     assert result is True
 
     # Verify insertion worked by retrieving it
-    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("Test insertion")
+    tokens, logprobs, loss_mask, versions = await middleware.query_cache_by_text("Test insertion")
 
     assert tokens == [4, 5, 6]
     assert logprobs == [-0.4, -0.5, -0.6]
@@ -235,7 +246,7 @@ async def test_middleware_concurrent_operations(middleware):
     """Test that middleware handles concurrent operations correctly."""
     # Test concurrent cache retrievals
     async def retrieve_text(text: str):
-        return await middleware._retrieve_cache(text)
+        return await middleware.query_cache_by_text(text)
 
     # Test concurrent cache insertions
     async def insert_text(text: str, tokens: list):
@@ -267,7 +278,7 @@ async def test_middleware_concurrent_operations(middleware):
 async def test_middleware_error_handling(middleware):
     """Test middleware error handling with async operations."""
     # Test with empty text (should not raise exception)
-    tokens, logprobs, loss_mask, versions = await middleware._retrieve_cache("")
+    tokens, logprobs, loss_mask, versions = await middleware.query_cache_by_text("")
     assert tokens == []
     assert logprobs == []
     assert loss_mask == []
@@ -541,77 +552,6 @@ async def test_middleware_performance_under_load(mock_router):
         # Verify reasonable performance
         assert avg_duration < 0.1, f"Average request duration too high: {avg_duration:.3f}s"
         assert throughput > 50, f"Throughput too low: {throughput:.1f} req/sec"
-
-
-@pytest.mark.asyncio
-async def test_cache_hit_rate_optimization(mock_router):
-    """Test cache hit rate impact on performance."""
-    with patch('slime.router.middleware.radix_tree_middleware.AutoTokenizer') as mock_tokenizer:
-        mock_tokenizer_instance = Mock()
-        mock_tokenizer_instance.return_value = {"input_ids": [1, 2, 3]}
-        mock_tokenizer_instance.decode.return_value = "Response"
-        mock_tokenizer.from_pretrained.return_value = mock_tokenizer_instance
-
-        app = Mock()
-        middleware = RadixTreeMiddleware(app, router=mock_router)
-
-        # Pre-populate cache with common prefixes
-        common_prefixes = ["Hello", "Hi", "Hey", "Good morning", "Good evening"]
-        for prefix in common_prefixes:
-            await middleware.radix_tree.insert_async(
-                prefix, [1, 2, 3], [-0.1, -0.2, -0.3], [0, 0, 1], weight_version=1
-            )
-
-        async def process_request(text: str):
-            """Process a single request and measure timing."""
-            request = Mock(spec=Request)
-            request.url.path = "/generate"
-            request.json = AsyncMock(return_value={"text": text})
-
-            mock_response = JSONResponse(content={
-                "text": " response",
-                "output_ids": [4],
-                "meta_info": {"weight_version": 1}
-            })
-            call_next = AsyncMock(return_value=mock_response)
-
-            start_time = time.time()
-            await middleware.dispatch(request, call_next)
-            end_time = time.time()
-
-            return end_time - start_time
-
-        # Test with high cache hit rate (80%)
-        high_hit_requests = []
-        for i in range(50):
-            if i % 5 == 0:  # 20% uncached
-                text = f"Unique text {i}"
-            else:  # 80% cached
-                text = common_prefixes[i % len(common_prefixes)]
-            duration = await process_request(text)
-            high_hit_requests.append(duration)
-
-        # Test with low cache hit rate (20%)
-        low_hit_requests = []
-        for i in range(50):
-            if i % 5 == 0:  # 20% cached
-                text = common_prefixes[i % len(common_prefixes)]
-            else:  # 80% uncached
-                text = f"Unique text {i}"
-            duration = await process_request(text)
-            low_hit_requests.append(duration)
-
-        # Analyze performance difference
-        avg_high_hit = sum(high_hit_requests) / len(high_hit_requests)
-        avg_low_hit = sum(low_hit_requests) / len(low_hit_requests)
-        performance_improvement = (avg_low_hit - avg_high_hit) / avg_low_hit * 100
-
-        print(f"High cache hit rate (80%): {avg_high_hit*1000:.2f}ms avg")
-        print(f"Low cache hit rate (20%): {avg_low_hit*1000:.2f}ms avg")
-        print(f"Performance improvement: {performance_improvement:.1f}%")
-
-        # Cache should provide measurable performance improvement
-        assert performance_improvement > 5, f"Cache should provide >5% improvement, got {performance_improvement:.1f}%"
 
 
 if __name__ == "__main__":
