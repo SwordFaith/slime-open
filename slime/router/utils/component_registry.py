@@ -42,6 +42,7 @@ class ComponentRegistry:
 
         Raises:
             ValueError: If name is empty or instance is None
+            RuntimeError: If component with same name already exists
         """
         with self._lock:
             if not name or not name.strip():
@@ -50,26 +51,30 @@ class ComponentRegistry:
             if instance is None:
                 raise ValueError("Component instance cannot be None")
 
-            # If component already exists, destroy old one first
+            # Protect against overwriting existing components
             if name in self._components:
-                self._destroy_component(name)
+                raise RuntimeError(
+                    f"Component '{name}' already registered. "
+                    f"Use remove() first if you want to replace it."
+                )
 
             self._components[name] = instance
             if on_destroy:
                 self._destructors[name] = on_destroy
 
-    def get(self, name: str) -> Any:
+    def get(self, name: str, default: Any = None) -> Any:
         """
-        Thread-safe component retrieval.
+        Thread-safe component retrieval with optional default value.
 
         Args:
             name: Name of the component to retrieve
+            default: Default value to return if component is not found (default: None)
 
         Returns:
-            The registered component instance
+            The registered component instance, or default value if not found
 
         Raises:
-            RuntimeError: If component is not found
+            RuntimeError: If component is not found and no default provided
             ValueError: If name is empty
         """
         with self._lock:
@@ -77,6 +82,11 @@ class ComponentRegistry:
                 raise ValueError("Component name cannot be empty")
 
             if name not in self._components:
+                # Return default if provided
+                if default is not None:
+                    return default
+
+                # Only raise if no default provided
                 available_components = list(self._components.keys())
                 raise RuntimeError(
                     f"Required component '{name}' not found. "
@@ -125,6 +135,16 @@ class ComponentRegistry:
         """
         with self._lock:
             return list(self._components.keys())
+
+    def list(self) -> Dict[str, Any]:
+        """
+        Get dictionary of all registered components (thread-safe snapshot).
+
+        Returns:
+            Dictionary mapping component names to component instances
+        """
+        with self._lock:
+            return dict(self._components)
 
     def clear(self) -> None:
         """Clear all registered components with destructors. Mainly for testing."""

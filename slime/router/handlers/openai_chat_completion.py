@@ -115,27 +115,42 @@ class ChatCompletionHandler:
             Either JSON response (non-streaming) or StreamingResponse
         """
         try:
-            request_data = await request.json()
-        except json.JSONDecodeError as e:
+            try:
+                request_data = await request.json()
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid JSON in request body: {str(e)}"
+                )
+
+            # Validate request structure
+            self._validate_chat_completion_request(request_data)
+
+            stream = request_data.get("stream", False)
+
+            # Check if cache support is available
+            cache_available = await self._check_cache_availability()
+
+            if not cache_available:
+                # Direct mode: Proxy to SGLang Chat Completion API
+                return await self._proxy_to_sglang_chat(request)
+
+            # Cached mode: Direct flow with radix cache (no internal HTTP)
+            return await self._handle_with_radix_cache(request_data, stream)
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
+        except Exception as e:
+            # Catch any unexpected errors and log them
+            import traceback
+            error_traceback = traceback.format_exc()
+            if getattr(self.args, 'verbose', False):
+                print(f"[slime-router] ERROR in handle_request: {e}")
+                print(f"[slime-router] Traceback:\n{error_traceback}")
             raise HTTPException(
-                status_code=400,
-                detail=f"Invalid JSON in request body: {str(e)}"
+                status_code=500,
+                detail=f"Internal server error: {str(e)}"
             )
-
-        # Validate request structure
-        self._validate_chat_completion_request(request_data)
-
-        stream = request_data.get("stream", False)
-
-        # Check if cache support is available
-        cache_available = await self._check_cache_availability()
-
-        if not cache_available:
-            # Direct mode: Proxy to SGLang Chat Completion API
-            return await self._proxy_to_sglang_chat(request)
-
-        # Cached mode: Direct flow with radix cache (no internal HTTP)
-        return await self._handle_with_radix_cache(request_data, stream)
 
     def _validate_chat_completion_request(self, request_data: dict):
         """
@@ -209,7 +224,7 @@ class ChatCompletionHandler:
 
         try:
             # Step 1: Parse reasoning content (if reasoning parser configured)
-            reasoning_parser_type = getattr(self.args, 'reasoning_parser', None)
+            reasoning_parser_type = getattr(self.args, 'sglang_reasoning_parser', None)
             if reasoning_parser_type:
                 if not self._reasoning_parser:
                     # Lazy initialize reasoning parser
@@ -224,7 +239,7 @@ class ChatCompletionHandler:
 
             # Step 2: Parse tool calls (if tools provided)
             tools = request_data.get("tools")
-            tool_call_parser_type = getattr(self.args, 'tool_call_parser', None)
+            tool_call_parser_type = getattr(self.args, 'sglang_tool_call_parser', None)
 
             if tools and tool_call_parser_type:
                 if not self._function_call_parser:
@@ -308,6 +323,44 @@ class ChatCompletionHandler:
                 # Non-streaming proxy
                 response = await self.router.client.request("POST", sglang_url, content=body, headers=headers)
                 content = await response.aread()
+
+                # Handle reasoning parser output: if content is None but reasoning_content exists, use it
+                try:
+                    response_json = json.loads(content) if content else {}
+
+                    if getattr(self.args, 'verbose', False):
+                        print(f"[slime-router] SGLang response status: {response.status_code}")
+
+                    # Check if reasoning parser put content in reasoning_content
+                    if (isinstance(response_json, dict) and
+                        'choices' in response_json and
+                        len(response_json['choices']) > 0):
+
+                        for choice in response_json['choices']:
+                            if 'message' in choice and isinstance(choice['message'], dict):
+                                message = choice['message']
+
+                                # If content is None but reasoning_content exists, merge them
+                                if message.get('content') is None and 'reasoning_content' in message:
+                                    reasoning_content = message.get('reasoning_content', '')
+
+                                    if getattr(self.args, 'verbose', False):
+                                        print(f"[slime-router] Fixing content=None: using reasoning_content ({len(reasoning_content)} chars)")
+
+                                    # Put reasoning content into content field for OpenAI compatibility
+                                    message['content'] = reasoning_content
+
+                                    # Optionally keep reasoning_content for backward compatibility
+                                    # message['reasoning_content'] = reasoning_content  # Keep it
+
+                        # Re-serialize the modified response
+                        content = json.dumps(response_json).encode('utf-8')
+
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    # If parsing fails, just pass through the original response
+                    if getattr(self.args, 'verbose', False):
+                        print(f"[slime-router] Warning: Failed to process reasoning content: {e}")
+
                 return Response(
                     content=content,
                     status_code=response.status_code,
@@ -361,6 +414,37 @@ class ChatCompletionHandler:
                     # Check for SGLang errors and map to OpenAI format
                     if response.status_code >= 400:
                         await self._handle_sglang_error(response, content)
+
+                    # Handle reasoning parser output: if content is None but reasoning_content exists, use it
+                    try:
+                        response_json = json.loads(content) if content else {}
+
+                        # Check if reasoning parser put content in reasoning_content
+                        if (isinstance(response_json, dict) and
+                            'choices' in response_json and
+                            len(response_json['choices']) > 0):
+
+                            for choice in response_json['choices']:
+                                if 'message' in choice and isinstance(choice['message'], dict):
+                                    message = choice['message']
+
+                                    # If content is None but reasoning_content exists, merge them
+                                    if message.get('content') is None and 'reasoning_content' in message:
+                                        reasoning_content = message.get('reasoning_content', '')
+
+                                        if getattr(self.args, 'verbose', False):
+                                            print(f"[slime-router] Fixing content=None (from_data): using reasoning_content ({len(reasoning_content)} chars)")
+
+                                        # Put reasoning content into content field for OpenAI compatibility
+                                        message['content'] = reasoning_content
+
+                            # Re-serialize the modified response
+                            content = json.dumps(response_json).encode('utf-8')
+
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        # If parsing fails, just pass through the original response
+                        if getattr(self.args, 'verbose', False):
+                            print(f"[slime-router] Warning: Failed to process reasoning content (from_data): {e}")
 
                     return Response(
                         content=content,
@@ -530,12 +614,11 @@ class ChatCompletionHandler:
             "skip_special_tokens": request_data.get("skip_special_tokens"),
             "spaces_between_special_tokens": request_data.get("spaces_between_special_tokens"),
             "no_stop_trim": request_data.get("no_stop_trim"),
-
-            # Streaming flag
-            "stream": stream
         }
 
         # Remove None values to keep request clean and avoid SGLang errors
+        # Note: 'stream' parameter is NOT part of sampling_params
+        # It's handled separately in the request JSON for /generate endpoint
         return {k: v for k, v in sampling_params.items() if v is not None}
 
     async def _non_stream_generate_with_cache(
@@ -564,7 +647,7 @@ class ChatCompletionHandler:
         worker_url = await self.router._use_url()
 
         try:
-            # Call SGLang /generate with input_ids (token in, token out)
+            # Use router's shared client for consistency
             response = await self.router.client.post(
                 f"{worker_url}/generate",
                 json={
@@ -573,7 +656,7 @@ class ChatCompletionHandler:
                     "return_logprob": False,
                     "return_text_in_logprobs": False,
                 },
-                timeout=httpx.Timeout(60.0)
+                timeout=60.0
             )
             response.raise_for_status()
             generate_data = response.json()

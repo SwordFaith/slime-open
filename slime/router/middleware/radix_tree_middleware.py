@@ -377,7 +377,18 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
         if "text" in request_json:
             input_text = request_json.pop("text", "")
         elif "input_ids" in request_json:
-            input_text = self.tokenizer.decode(request_json["input_ids"])
+            input_ids = request_json["input_ids"]
+            # Handle both batch format (list of lists) and single sequence (flat list)
+            if isinstance(input_ids, list) and len(input_ids) > 0:
+                # Check if this is batch format (list of lists) or single sequence (flat list)
+                if isinstance(input_ids[0], list):
+                    # Batch format: take first sequence only (middleware currently only supports single sequence caching)
+                    input_text = self.tokenizer.decode(input_ids[0])
+                else:
+                    # Single sequence format
+                    input_text = self.tokenizer.decode(input_ids)
+            else:
+                input_text = None
         else:
             input_text = None
 

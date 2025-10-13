@@ -161,33 +161,43 @@ class SlimeRouter:
                     # Re-raise to let FastAPI handle the error
                     raise
             else:
-                # Non-streaming: original logic
-                response = await self.client.request(request.method, url, content=body, headers=headers)
-                # Eagerly read content so we can return JSON (not streaming)
-                content = await response.aread()
-                content_type = response.headers.get("content-type", "")
+                # Non-streaming: use shared client for consistency
                 try:
-                    # Prefer parsing JSON if possible
-                    data = json.loads(content)
-                    return JSONResponse(
-                        content=data,
-                        status_code=response.status_code,
-                        headers=dict(response.headers),
-                    )
+                    response = await self.client.request(request.method, url, content=body, headers=headers)
+                    # Eagerly read content so we can return JSON (not streaming)
+                    content = await response.aread()
+                    content_type = response.headers.get("content-type", "")
+                    try:
+                        # Prefer parsing JSON if possible
+                        data = json.loads(content)
+                        return JSONResponse(
+                            content=data,
+                            status_code=response.status_code,
+                            headers=dict(response.headers),
+                        )
+                    except Exception as e:
+                        # Phase 2 TODO: Implement secure exception handling with proper error categorization
+                        # Currently falls back to raw body, should implement:
+                        # - Malformed JSON detection and specific error messages
+                        # - Content-type validation with security checks
+                        # - Structured error responses with error codes
+                        # - Rate limiting for error responses
+                        # - Security: prevent error information leakage
+                        return Response(
+                            content=content,
+                            status_code=response.status_code,
+                            headers=dict(response.headers),
+                            media_type=content_type or None,
+                        )
                 except Exception as e:
-                    # Phase 2 TODO: Implement secure exception handling with proper error categorization
-                    # Currently falls back to raw body, should implement:
-                    # - Malformed JSON detection and specific error messages
-                    # - Content-type validation with security checks
-                    # - Structured error responses with error codes
-                    # - Rate limiting for error responses
-                    # - Security: prevent error information leakage
-                    return Response(
-                        content=content,
-                        status_code=response.status_code,
-                        headers=dict(response.headers),
-                        media_type=content_type or None,
-                    )
+                    # Log non-streaming proxy errors
+                    if self.verbose:
+                        import traceback
+                        print(f"[slime-router] Non-streaming proxy error for /{path}: {e}")
+                        print(f"[slime-router] URL: {url}")
+                        print(f"[slime-router] Traceback:\n{traceback.format_exc()}")
+                    # Re-raise to let FastAPI handle the error
+                    raise
 
         finally:
             await self._finish_url(worker_url)
