@@ -19,100 +19,20 @@ Parser 配置:
 import pytest
 import requests
 import time
-from sglang.srt.hf_transformers_utils import get_tokenizer
-from sglang.utils import launch_server_cmd, terminate_process, wait_for_server
 
-MODEL_PATH = "Qwen/Qwen3-4B-Thinking-2507"
-ROUTER_PORT = 30000
-SGLANG_PORT = 30001
+# Note: Fixtures are defined in conftest.py (session-scoped)
+# - sglang_server: SGLang server instance
+# - tokenizer: Model tokenizer
+# - router_without_cache: Router without RadixTree middleware
+# - router_with_cache: Router with RadixTree middleware
 
 
 class TestTokenInTokenOut:
-    """验证 token in/token out 流程"""
+    """验证 token in/token out 流程
 
-    @pytest.fixture(scope="class")
-    def sglang_server(self):
-        """启动 SGLang server with parsers"""
-        cmd = (
-            f"python -m sglang.launch_server "
-            f"--model-path {MODEL_PATH} "
-            f"--host 0.0.0.0 "
-            f"--port {SGLANG_PORT} "
-            f"--tool-call-parser qwen25 "
-            f"--reasoning-parser qwen3"
-        )
-
-        print(f"\n启动 SGLang server: {cmd}")
-        process, port = launch_server_cmd(cmd)
-        wait_for_server(f"http://localhost:{port}")
-        print(f"SGLang server ready on port {port}")
-
-        yield port
-
-        print("\n关闭 SGLang server...")
-        terminate_process(process)
-
-    @pytest.fixture(scope="class")
-    def tokenizer(self):
-        """加载 tokenizer"""
-        print(f"\n加载 tokenizer: {MODEL_PATH}")
-        return get_tokenizer(MODEL_PATH)
-
-    @pytest.fixture
-    def router_without_cache(self, sglang_server):
-        """启动 Router (无 radix cache)"""
-        from slime.router.router import SlimeRouter
-        from unittest.mock import MagicMock
-
-        print("\n创建 Router (无 cache)")
-        args = MagicMock()
-        args.sglang_router_ip = "0.0.0.0"
-        args.sglang_router_port = ROUTER_PORT
-        args.sglang_server_concurrency = 32
-        args.rollout_num_gpus = 1
-        args.rollout_num_gpus_per_engine = 1
-        args.slime_router_middleware_paths = []  # 无 cache middleware
-        args.verbose = True
-        args.model_name = "qwen3-thinking"
-
-        router = SlimeRouter(args, verbose=True)
-
-        # 添加 SGLang worker
-        worker_url = f"http://localhost:{sglang_server}"
-        router.worker_urls[worker_url] = 0
-        print(f"添加 worker: {worker_url}")
-
-        return router
-
-    @pytest.fixture
-    def router_with_cache(self, sglang_server):
-        """启动 Router (有 radix cache)"""
-        from slime.router.router import SlimeRouter
-        from unittest.mock import MagicMock
-
-        print("\n创建 Router (有 cache)")
-        args = MagicMock()
-        args.sglang_router_ip = "0.0.0.0"
-        args.sglang_router_port = ROUTER_PORT
-        args.sglang_server_concurrency = 32
-        args.rollout_num_gpus = 1
-        args.rollout_num_gpus_per_engine = 1
-        args.slime_router_middleware_paths = [
-            "slime.router.middleware.radix_tree_middleware.RadixTreeMiddleware"
-        ]
-        args.hf_checkpoint = MODEL_PATH
-        args.radix_tree_max_size = 10000
-        args.verbose = True
-        args.model_name = "qwen3-thinking"
-
-        router = SlimeRouter(args, verbose=True)
-
-        # 添加 SGLang worker
-        worker_url = f"http://localhost:{sglang_server}"
-        router.worker_urls[worker_url] = 0
-        print(f"添加 worker: {worker_url}")
-
-        return router
+    Note: 所有 fixtures (sglang_server, tokenizer, router_without_cache, router_with_cache)
+    都已在 conftest.py 中定义为 session-scoped，本测试类直接使用它们。
+    """
 
     @pytest.mark.e2e
     def test_direct_sglang_token_in_token_out(self, sglang_server, tokenizer):
@@ -233,7 +153,7 @@ class TestTokenInTokenOut:
         print("\n✅ 测试通过：Router 无 cache 直接代理正常工作")
 
     @pytest.mark.e2e
-    def test_router_with_cache_token_in_token_out(self, router_with_cache, tokenizer):
+    async def test_router_with_cache_token_in_token_out(self, router_with_cache, tokenizer):
         """测试 3: Router 有 cache - token in/token out 流程
 
         验证：
@@ -248,7 +168,9 @@ class TestTokenInTokenOut:
         print("测试 3: Router 有 cache - token in/token out 流程")
         print("="*60)
 
-        from fastapi.testclient import TestClient
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
         # 第一次请求 - cache miss
         request_data = {
@@ -262,60 +184,61 @@ class TestTokenInTokenOut:
 
         print(f"\n第一次请求 (cache miss): {request_data['messages'][0]['content']}")
 
-        # Create a single client for both requests to avoid event loop issues
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            start_time = time.time()
+            response1 = await client.post("/v1/chat/completions", json=request_data)
+            time1 = time.time() - start_time
 
-        start_time = time.time()
-        response1 = client.post("/v1/chat/completions", json=request_data)
-        time1 = time.time() - start_time
+            print(f"响应时间: {time1:.2f}s")
+            print(f"状态码: {response1.status_code}")
 
-        print(f"响应时间: {time1:.2f}s")
-        print(f"状态码: {response1.status_code}")
+            assert response1.status_code == 200, f"First request failed: {response1.status_code}"
+            response1_data = response1.json()
 
-        assert response1.status_code == 200, f"First request failed: {response1.status_code}"
-        response1_data = response1.json()
+            # 验证格式
+            assert response1_data["object"] == "chat.completion"
+            assert len(response1_data["choices"]) == 1
 
-        # 验证格式
-        assert response1_data["object"] == "chat.completion"
-        assert len(response1_data["choices"]) == 1
+            content1 = response1_data["choices"][0]["message"]["content"]
+            print(f"生成内容: '{content1[:80]}{'...' if len(content1) > 80 else ''}'")
+            print(f"Token usage: {response1_data['usage']}")
 
-        content1 = response1_data["choices"][0]["message"]["content"]
-        print(f"生成内容: '{content1[:80]}{'...' if len(content1) > 80 else ''}'")
-        print(f"Token usage: {response1_data['usage']}")
+            # 第二次请求 - cache hit (相同 prompt)
+            print(f"\n第二次请求 (cache hit): {request_data['messages'][0]['content']}")
+            start_time = time.time()
+            response2 = await client.post("/v1/chat/completions", json=request_data)
+            time2 = time.time() - start_time
 
-        # 第二次请求 - cache hit (相同 prompt)
-        print(f"\n第二次请求 (cache hit): {request_data['messages'][0]['content']}")
-        start_time = time.time()
-        response2 = client.post("/v1/chat/completions", json=request_data)
-        time2 = time.time() - start_time
+            print(f"响应时间: {time2:.2f}s")
+            print(f"状态码: {response2.status_code}")
+            if response2.status_code != 200:
+                print(f"ERROR详情: {response2.text}")
 
-        print(f"响应时间: {time2:.2f}s")
-        print(f"状态码: {response2.status_code}")
-        if response2.status_code != 200:
-            print(f"ERROR详情: {response2.text}")
+            assert response2.status_code == 200, f"Second request failed: {response2.status_code}"
+            response2_data = response2.json()
 
-        assert response2.status_code == 200, f"Second request failed: {response2.status_code}"
-        response2_data = response2.json()
+            content2 = response2_data["choices"][0]["message"]["content"]
+            print(f"生成内容: '{content2[:80]}{'...' if len(content2) > 80 else ''}'")
+            print(f"Token usage: {response2_data['usage']}")
 
-        content2 = response2_data["choices"][0]["message"]["content"]
-        print(f"生成内容: '{content2[:80]}{'...' if len(content2) > 80 else ''}'")
-        print(f"Token usage: {response2_data['usage']}")
+            # 验证 cache 效果
+            print(f"\n性能对比:")
+            print(f"  第一次 (cache miss): {time1:.3f}s")
+            print(f"  第二次 (cache hit):  {time2:.3f}s")
+            speedup = time1 / time2 if time2 > 0 else 1.0
+            print(f"  加速比: {speedup:.2f}x")
 
-        # 验证 cache 效果
-        print(f"\n性能对比:")
-        print(f"  第一次 (cache miss): {time1:.3f}s")
-        print(f"  第二次 (cache hit):  {time2:.3f}s")
-        speedup = time1 / time2 if time2 > 0 else 1.0
-        print(f"  加速比: {speedup:.2f}x")
+            # Cache hit 应该更快（至少减少 tokenization 时间）
+            # 但由于 temperature > 0，生成部分可能差异不大
+            # 我们主要验证功能正确性，性能只作为参考
 
-        # Cache hit 应该更快（至少减少 tokenization 时间）
-        # 但由于 temperature > 0，生成部分可能差异不大
-        # 我们主要验证功能正确性，性能只作为参考
-
-        print("\n✅ 测试通过：Router 有 cache token in/token out 正常工作")
+            print("\n✅ 测试通过：Router 有 cache token in/token out 正常工作")
 
     @pytest.mark.e2e
-    def test_router_with_cache_multi_turn_conversation(self, router_with_cache, tokenizer):
+    async def test_router_with_cache_multi_turn_conversation(self, router_with_cache, tokenizer):
         """测试 4: 多轮对话的 cache 效果
 
         验证：
@@ -327,7 +250,9 @@ class TestTokenInTokenOut:
         print("测试 4: 多轮对话 cache 效果")
         print("="*60)
 
-        from fastapi.testclient import TestClient
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
         # Turn 1
         request1 = {
@@ -339,44 +264,48 @@ class TestTokenInTokenOut:
         }
 
         print(f"\nTurn 1: {request1['messages'][0]['content']}")
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
-        response1 = client.post("/v1/chat/completions", json=request1)
-        assert response1.status_code == 200, f"Turn 1 failed: {response1.status_code}"
 
-        assistant_reply = response1.json()["choices"][0]["message"]["content"]
-        print(f"Assistant: '{assistant_reply}'")
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            response1 = await client.post("/v1/chat/completions", json=request1)
+            assert response1.status_code == 200, f"Turn 1 failed: {response1.status_code}"
 
-        # Turn 2 - 应该复用 turn 1 的 cache
-        request2 = {
-            "model": "qwen3-thinking",
-            "messages": [
-                {"role": "user", "content": "What is 2+2?"},
-                {"role": "assistant", "content": assistant_reply},
-                {"role": "user", "content": "What about 3+3?"}
-            ],
-            "max_tokens": 30
-        }
+            assistant_reply = response1.json()["choices"][0]["message"]["content"]
+            print(f"Assistant: '{assistant_reply}'")
 
-        print(f"\nTurn 2: {request2['messages'][-1]['content']}")
-        print("(包含前一轮对话��应复用 cache)")
+            # Turn 2 - 应该复用 turn 1 的 cache
+            request2 = {
+                "model": "qwen3-thinking",
+                "messages": [
+                    {"role": "user", "content": "What is 2+2?"},
+                    {"role": "assistant", "content": assistant_reply},
+                    {"role": "user", "content": "What about 3+3?"}
+                ],
+                "max_tokens": 30
+            }
 
-        start_time = time.time()
-        response2 = client.post("/v1/chat/completions", json=request2)
-        time2 = time.time() - start_time
+            print(f"\nTurn 2: {request2['messages'][-1]['content']}")
+            print("(包含前一轮对话��应复用 cache)")
 
-        print(f"响应时间: {time2:.2f}s")
-        assert response2.status_code == 200, f"Turn 2 failed: {response2.status_code}"
+            start_time = time.time()
+            response2 = await client.post("/v1/chat/completions", json=request2)
+            time2 = time.time() - start_time
 
-        # 验证响应格式
-        response2_data = response2.json()
-        assert response2_data["object"] == "chat.completion"
-        assert len(response2_data["choices"]) == 1
+            print(f"响应时间: {time2:.2f}s")
+            assert response2.status_code == 200, f"Turn 2 failed: {response2.status_code}"
 
-        assistant_reply2 = response2_data["choices"][0]["message"]["content"]
-        print(f"Assistant: '{assistant_reply2}'")
-        print(f"Token usage: {response2_data['usage']}")
+            # 验证响应格式
+            response2_data = response2.json()
+            assert response2_data["object"] == "chat.completion"
+            assert len(response2_data["choices"]) == 1
 
-        print("\n✅ 测试通过：多轮对话 cache 正常工作")
+            assistant_reply2 = response2_data["choices"][0]["message"]["content"]
+            print(f"Assistant: '{assistant_reply2}'")
+            print(f"Token usage: {response2_data['usage']}")
+
+            print("\n✅ 测试通过：多轮对话 cache 正常工作")
 
     @pytest.mark.e2e
     def test_reasoning_parser_integration(self, router_with_cache):
@@ -561,6 +490,11 @@ class TestTokenInTokenOut:
         assert "finish_reason" in choice, "Missing 'finish_reason'"
 
         content = choice["message"]["content"]
+        # For Qwen3-Thinking model, content might be None and actual response in reasoning_content
+        if content is None and "reasoning_content" in choice["message"]:
+            content = choice["message"]["reasoning_content"]
+            print(f"  ℹ Content was None, using reasoning_content instead")
+        assert content is not None, "Both content and reasoning_content are None"
         assert len(content) > 0, "Content should not be empty"
         print(f"  ✓ Message content: '{content[:60]}{'...' if len(content) > 60 else ''}'")
         print(f"  ✓ Finish reason: {choice['finish_reason']}")

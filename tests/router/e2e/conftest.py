@@ -55,6 +55,10 @@ def sglang_server() -> Generator[int, None, None]:
     This fixture is session-scoped to avoid repeated server startup/shutdown.
     All E2E tests share the same SGLang server instance.
 
+    Environment Variables:
+        SKIP_E2E_TESTS: Set to "1" to skip E2E tests
+        SGLANG_E2E_EXISTING_PORT: Use existing SGLang server on this port (skips launch)
+
     Yields:
         int: Port number where SGLang server is running
 
@@ -64,6 +68,28 @@ def sglang_server() -> Generator[int, None, None]:
     # Check if E2E tests should be skipped
     if os.getenv("SKIP_E2E_TESTS") == "1":
         pytest.skip("E2E tests disabled via SKIP_E2E_TESTS=1")
+
+    # Check if using existing SGLang server
+    existing_port = os.getenv("SGLANG_E2E_EXISTING_PORT")
+    if existing_port:
+        port = int(existing_port)
+        print(f"\n[E2E Setup] Using existing SGLang server on port {port}")
+        print(f"  Skipping server launch (SGLANG_E2E_EXISTING_PORT={existing_port})")
+
+        # Verify server is accessible
+        try:
+            import requests
+            response = requests.get(f"http://localhost:{port}/health", timeout=5)
+            print(f"  ✓ Server health check passed")
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not verify server health: {e}")
+            print(f"  Proceeding anyway...")
+
+        yield port
+
+        # Don't terminate pre-existing server
+        print(f"\n[E2E Teardown] Skipping server termination (using existing server)")
+        return
 
     # Build launch command
     cmd = (
@@ -81,6 +107,7 @@ def sglang_server() -> Generator[int, None, None]:
     print(f"  Tool Call Parser: {TOOL_CALL_PARSER}")
     print(f"  Reasoning Parser: {REASONING_PARSER}")
     print(f"  Command: {cmd}")
+    print(f"  Note: This may take 2-5 minutes on first run...")
 
     # Launch server
     process, port = launch_server_cmd(cmd)

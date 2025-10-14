@@ -123,7 +123,7 @@ async def test_openai_chat_completion_basic_request(mock_handler):
     })
 
     # Mock cache unavailable -> direct proxy mode
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
         response = await mock_handler.handle_request(mock_request)
 
@@ -184,7 +184,7 @@ async def test_openai_chat_completion_streaming(mock_handler):
     expected_response = StreamingResponse(mock_stream_generator(), media_type="text/event-stream")
 
     # Mock cache unavailable -> direct proxy mode with streaming
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
         response = await mock_handler.handle_request(mock_request)
 
@@ -242,7 +242,7 @@ async def test_openai_chat_completion_with_system_prompt(mock_handler):
     })
 
     # Mock direct proxy mode
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
         response = await mock_handler.handle_request(mock_request)
 
@@ -292,7 +292,7 @@ async def test_openai_chat_completion_multi_turn_conversation(mock_handler):
     })
 
     # Mock direct proxy mode
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', return_value=expected_response):
         response = await mock_handler.handle_request(mock_request)
 
@@ -382,7 +382,7 @@ async def test_openai_middleware_integration(mock_handler, mock_router):
     })
 
     # Mock cache available -> use cache mode
-    with patch.object(mock_handler, '_check_cache_availability', return_value=True), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=True), \
          patch.object(mock_handler, '_handle_with_radix_cache', return_value=expected_response):
         response = await mock_handler.handle_request(mock_request)
 
@@ -404,7 +404,7 @@ async def test_error_recovery_scenarios(mock_handler, mocker):
     mock_request.json = AsyncMock(return_value=request_data)
 
     # Test network timeout simulation
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=504, detail="Network timeout")):
         with pytest.raises(HTTPException) as exc_info:
             await mock_handler.handle_request(mock_request)
@@ -412,7 +412,7 @@ async def test_error_recovery_scenarios(mock_handler, mocker):
             f"Should return 504 for network timeout, got {exc_info.value.status_code}"
 
     # Test backend service error
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=503, detail="Service unavailable")):
         with pytest.raises(HTTPException) as exc_info:
             await mock_handler.handle_request(mock_request)
@@ -420,7 +420,7 @@ async def test_error_recovery_scenarios(mock_handler, mocker):
             f"Should return 503 for service unavailable, got {exc_info.value.status_code}"
 
     # Test invalid response from backend
-    with patch.object(mock_handler, '_check_cache_availability', return_value=False), \
+    with patch.object(mock_handler.router, '_check_cache_availability', return_value=False), \
          patch.object(mock_handler, '_proxy_to_sglang_chat', side_effect=HTTPException(status_code=500, detail="Invalid response")):
         with pytest.raises(HTTPException) as exc_info:
             await mock_handler.handle_request(mock_request)

@@ -115,7 +115,7 @@ class TestGenerateAPI:
         print("\n✅ Test A2 PASSED: Router /generate without middleware works correctly")
 
     @pytest.mark.e2e
-    def test_router_generate_with_middleware(
+    async def test_router_generate_with_middleware(
         self, router_with_cache, sglang_url, tokenizer
     ):
         """
@@ -154,54 +154,59 @@ class TestGenerateAPI:
             },
         }
 
-        from fastapi.testclient import TestClient
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
-        # First request - cache miss
-        print("\n--- First Request (cache miss) ---")
-        start_time = time.time()
-        response1 = client.post("/generate", json=request_data)
-        time1 = time.time() - start_time
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            # First request - cache miss
+            print("\n--- First Request (cache miss) ---")
+            start_time = time.time()
+            response1 = await client.post("/generate", json=request_data)
+            time1 = time.time() - start_time
 
-        print(f"Response time: {time1:.3f}s")
-        print(f"Status code: {response1.status_code}")
+            print(f"Response time: {time1:.3f}s")
+            print(f"Status code: {response1.status_code}")
 
-        assert response1.status_code == 200, (
-            f"First request failed: {response1.status_code}\n{response1.text}"
-        )
+            assert response1.status_code == 200, (
+                f"First request failed: {response1.status_code}\n{response1.text}"
+            )
 
-        outputs1 = response1.json()
-        assert len(outputs1) == 1, "Should have 1 output"
-        assert "output_ids" in outputs1[0], "Missing output_ids"
+            outputs1 = response1.json()
+            assert len(outputs1) == 1, "Should have 1 output"
+            assert "output_ids" in outputs1[0], "Missing output_ids"
 
-        decoded1 = tokenizer.decode(outputs1[0]["output_ids"])
-        print(f"Generated tokens: {len(outputs1[0]['output_ids'])}")
-        print(f"Decoded: '{decoded1[:80]}{'...' if len(decoded1) > 80 else ''}'")
+            decoded1 = tokenizer.decode(outputs1[0]["output_ids"])
+            print(f"Generated tokens: {len(outputs1[0]['output_ids'])}")
+            print(f"Decoded: '{decoded1[:80]}{'...' if len(decoded1) > 80 else ''}'")
 
-        # Second request - cache hit (same prompt)
-        print("\n--- Second Request (cache hit expected) ---")
-        start_time = time.time()
-        response2 = client.post("/generate", json=request_data)
-        time2 = time.time() - start_time
+            # Second request - cache hit (same prompt)
+            print("\n--- Second Request (cache hit expected) ---")
+            start_time = time.time()
+            response2 = await client.post("/generate", json=request_data)
+            time2 = time.time() - start_time
 
-        print(f"Response time: {time2:.3f}s")
-        print(f"Status code: {response2.status_code}")
+            print(f"Response time: {time2:.3f}s")
+            print(f"Status code: {response2.status_code}")
 
-        assert response2.status_code == 200, (
-            f"Second request failed: {response2.status_code}\n{response2.text}"
-        )
+            assert response2.status_code == 200, (
+                f"Second request failed: {response2.status_code}\n{response2.text}"
+            )
 
-        outputs2 = response2.json()
-        decoded2 = tokenizer.decode(outputs2[0]["output_ids"])
-        print(f"Generated tokens: {len(outputs2[0]['output_ids'])}")
-        print(f"Decoded: '{decoded2[:80]}{'...' if len(decoded2) > 80 else ''}'")
+            outputs2 = response2.json()
+            decoded2 = tokenizer.decode(outputs2[0]["output_ids"])
+            print(f"Generated tokens: {len(outputs2[0]['output_ids'])}")
+            print(f"Decoded: '{decoded2[:80]}{'...' if len(decoded2) > 80 else ''}'")
 
-        # Performance comparison
-        print(f"\n--- Performance Comparison ---")
-        print(f"First request (cache miss):  {time1:.3f}s")
-        print(f"Second request (cache hit):  {time2:.3f}s")
-        speedup = time1 / time2 if time2 > 0 else 1.0
-        print(f"Speedup: {speedup:.2f}x")
+            # Performance comparison
+            print(f"\n--- Performance Comparison ---")
+            print(f"First request (cache miss):  {time1:.3f}s")
+            print(f"Second request (cache hit):  {time2:.3f}s")
+            speedup = time1 / time2 if time2 > 0 else 1.0
+            print(f"Speedup: {speedup:.2f}x")
 
         # Note: With temperature>0, outputs will differ
         # We verify functional correctness, not output identity
@@ -210,7 +215,7 @@ class TestGenerateAPI:
         print("\n✅ Test A3 PASSED: Router /generate with middleware works correctly")
 
     @pytest.mark.e2e
-    def test_generate_logprob_caching(
+    async def test_generate_logprob_caching(
         self, router_with_cache, sglang_url, tokenizer
     ):
         """
@@ -248,82 +253,87 @@ class TestGenerateAPI:
             "return_logprob": True,  # Enable logprob return
         }
 
-        from fastapi.testclient import TestClient
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
-        # First request - compute and cache logprobs
-        print("\n--- First Request (compute logprobs) ---")
-        response1 = client.post("/generate", json=request_data)
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            # First request - compute and cache logprobs
+            print("\n--- First Request (compute logprobs) ---")
+            response1 = await client.post("/generate", json=request_data)
 
-        print(f"Status code: {response1.status_code}")
-        assert response1.status_code == 200, (
-            f"First request failed: {response1.status_code}\n{response1.text}"
-        )
+            print(f"Status code: {response1.status_code}")
+            assert response1.status_code == 200, (
+                f"First request failed: {response1.status_code}\n{response1.text}"
+            )
 
-        outputs1 = response1.json()
-        assert len(outputs1) == 1, "Should have 1 output"
+            outputs1 = response1.json()
+            assert len(outputs1) == 1, "Should have 1 output"
 
-        # Check if logprobs are returned
-        output1 = outputs1[0]
-        if "output_log_probs" in output1:
-            logprobs1 = output1["output_log_probs"]
-            print(f"Logprobs returned: {len(logprobs1)} values")
-            print(f"First 5 logprobs: {logprobs1[:5]}")
-        else:
-            # SGLang might return logprobs in different field or structure
-            print(f"Response keys: {output1.keys()}")
-            # For now, we log this for investigation
-            print("Note: output_log_probs not in standard location")
-            # Don't fail test - this is exploratory
+            # Check if logprobs are returned
+            output1 = outputs1[0]
+            if "output_log_probs" in output1:
+                logprobs1 = output1["output_log_probs"]
+                print(f"Logprobs returned: {len(logprobs1)} values")
+                print(f"First 5 logprobs: {logprobs1[:5]}")
+            else:
+                # SGLang might return logprobs in different field or structure
+                print(f"Response keys: {output1.keys()}")
+                # For now, we log this for investigation
+                print("Note: output_log_probs not in standard location")
+                # Don't fail test - this is exploratory
 
-        decoded1 = tokenizer.decode(output1["output_ids"])
-        print(f"Generated: '{decoded1}'")
+            decoded1 = tokenizer.decode(output1["output_ids"])
+            print(f"Generated: '{decoded1}'")
 
-        # Second request - retrieve cached logprobs
-        print("\n--- Second Request (retrieve cached logprobs) ---")
-        response2 = client.post("/generate", json=request_data)
+            # Second request - retrieve cached logprobs
+            print("\n--- Second Request (retrieve cached logprobs) ---")
+            response2 = await client.post("/generate", json=request_data)
 
-        print(f"Status code: {response2.status_code}")
-        assert response2.status_code == 200, (
-            f"Second request failed: {response2.status_code}\n{response2.text}"
-        )
+            print(f"Status code: {response2.status_code}")
+            assert response2.status_code == 200, (
+                f"Second request failed: {response2.status_code}\n{response2.text}"
+            )
 
-        outputs2 = response2.json()
-        output2 = outputs2[0]
+            outputs2 = response2.json()
+            output2 = outputs2[0]
 
-        decoded2 = tokenizer.decode(output2["output_ids"])
-        print(f"Generated: '{decoded2}'")
+            decoded2 = tokenizer.decode(output2["output_ids"])
+            print(f"Generated: '{decoded2}'")
 
-        # With temperature=0, outputs should be identical
-        assert decoded1 == decoded2, (
-            f"Deterministic generation mismatch:\n"
-            f"  First:  '{decoded1}'\n"
-            f"  Second: '{decoded2}'"
-        )
+            # With temperature=0, outputs should be identical
+            assert decoded1 == decoded2, (
+                f"Deterministic generation mismatch:\n"
+                f"  First:  '{decoded1}'\n"
+                f"  Second: '{decoded2}'"
+            )
 
-        # Verify logprob consistency (if available)
-        if "output_log_probs" in output1 and "output_log_probs" in output2:
-            logprobs2 = output2["output_log_probs"]
-            print(f"\nLogprob comparison:")
-            print(f"  First request:  {len(logprobs1)} values")
-            print(f"  Second request: {len(logprobs2)} values")
+            # Verify logprob consistency (if available)
+            if "output_log_probs" in output1 and "output_log_probs" in output2:
+                logprobs2 = output2["output_log_probs"]
+                print(f"\nLogprob comparison:")
+                print(f"  First request:  {len(logprobs1)} values")
+                print(f"  Second request: {len(logprobs2)} values")
 
-            # Check precision
-            assert len(logprobs1) == len(logprobs2), "Logprob count mismatch"
+                # Check precision
+                assert len(logprobs1) == len(logprobs2), "Logprob count mismatch"
 
-            max_diff = 0.0
-            for i, (lp1, lp2) in enumerate(zip(logprobs1, logprobs2)):
-                diff = abs(lp1 - lp2)
-                max_diff = max(max_diff, diff)
-                if i < 5:  # Print first 5
-                    print(f"    Token {i}: {lp1:.6f} vs {lp2:.6f} (diff={diff:.2e})")
+                max_diff = 0.0
+                for i, (lp1, lp2) in enumerate(zip(logprobs1, logprobs2)):
+                    diff = abs(lp1 - lp2)
+                    max_diff = max(max_diff, diff)
+                    if i < 5:  # Print first 5
+                        print(f"    Token {i}: {lp1:.6f} vs {lp2:.6f} (diff={diff:.2e})")
 
-            print(f"  Max difference: {max_diff:.2e}")
-            assert max_diff < 1e-6, f"Logprob precision loss: max_diff={max_diff}"
-            print("  ✓ Logprob precision verified (< 1e-6)")
-        else:
-            print("\nNote: Logprobs not available in response")
-            print("This may be expected depending on SGLang configuration")
+                print(f"  Max difference: {max_diff:.2e}")
+                assert max_diff < 1e-6, f"Logprob precision loss: max_diff={max_diff}"
+                print("  ✓ Logprob precision verified (< 1e-6)")
+            else:
+                print("\nNote: Logprobs not available in response")
+                print("This may be expected depending on SGLang configuration")
 
         print("\n✅ Test A4 PASSED: Logprob caching verified")
 

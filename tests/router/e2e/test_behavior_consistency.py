@@ -125,7 +125,7 @@ class TestBehaviorConsistency:
         print("\n✅ Test D1 PASSED: /generate output consistency verified")
 
     @pytest.mark.e2e
-    def test_cross_api_consistency(
+    async def test_cross_api_consistency(
         self, router_with_cache, sglang_url, tokenizer
     ):
         """
@@ -152,64 +152,68 @@ class TestBehaviorConsistency:
         print("Test D3: Cross-API consistency")
         print("=" * 60)
 
-        from fastapi.testclient import TestClient
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            # Test input
+            user_message = "What is 2+2?"
 
-        # Test input
-        user_message = "What is 2+2?"
+            print(f"\nUser message: '{user_message}'")
 
-        print(f"\nUser message: '{user_message}'")
-
-        # API 1: /v1/chat/completions
-        print("\n--- API 1: /v1/chat/completions ---")
-        chat_request = {
-            "model": "qwen3-thinking",
-            "messages": [{"role": "user", "content": user_message}],
-            "max_tokens": 30,
-            "temperature": 0.0,
-        }
-
-        response_chat = client.post("/v1/chat/completions", json=chat_request)
-        print(f"Status: {response_chat.status_code}")
-        assert response_chat.status_code == 200
-
-        data_chat = response_chat.json()
-        content_chat = data_chat["choices"][0]["message"]["content"]
-        print(f"Response: '{content_chat}'")
-
-        # API 2: /generate (need to manually apply chat template)
-        print("\n--- API 2: /generate ---")
-
-        # Apply chat template to get tokens
-        messages = [{"role": "user", "content": user_message}]
-        prompt_text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        token_ids = tokenizer.encode(prompt_text)
-
-        print(f"Chat template applied: '{prompt_text[:80]}...'")
-        print(f"Token IDs: {len(token_ids)} tokens")
-
-        generate_request = {
-            "input_ids": [token_ids],
-            "sampling_params": {
+            # API 1: /v1/chat/completions
+            print("\n--- API 1: /v1/chat/completions ---")
+            chat_request = {
+                "model": "qwen3-thinking",
+                "messages": [{"role": "user", "content": user_message}],
+                "max_tokens": 30,
                 "temperature": 0.0,
-                "max_new_tokens": 30,
-            },
-        }
+            }
 
-        response_generate = client.post("/generate", json=generate_request)
+            response_chat = await client.post("/v1/chat/completions", json=chat_request)
+            print(f"Status: {response_chat.status_code}")
+            assert response_chat.status_code == 200
 
-        print(f"Status: {response_generate.status_code}")
-        assert response_generate.status_code == 200
+            data_chat = response_chat.json()
+            content_chat = data_chat["choices"][0]["message"]["content"]
+            print(f"Response: '{content_chat}'")
 
-        outputs_generate = response_generate.json()
-        output_tokens = outputs_generate[0]["output_ids"]
-        content_generate = tokenizer.decode(output_tokens)
-        print(f"Response: '{content_generate}'")
+            # API 2: /generate (need to manually apply chat template)
+            print("\n--- API 2: /generate ---")
+
+            # Apply chat template to get tokens
+            messages = [{"role": "user", "content": user_message}]
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            token_ids = tokenizer.encode(prompt_text)
+
+            print(f"Chat template applied: '{prompt_text[:80]}...'")
+            print(f"Token IDs: {len(token_ids)} tokens")
+
+            generate_request = {
+                "input_ids": [token_ids],
+                "sampling_params": {
+                    "temperature": 0.0,
+                    "max_new_tokens": 30,
+                },
+            }
+
+            response_generate = await client.post("/generate", json=generate_request)
+
+            print(f"Status: {response_generate.status_code}")
+            assert response_generate.status_code == 200
+
+            outputs_generate = response_generate.json()
+            output_tokens = outputs_generate[0]["output_ids"]
+            content_generate = tokenizer.decode(output_tokens)
+            print(f"Response: '{content_generate}'")
 
         # Verification
         print(f"\n--- Verification ---")

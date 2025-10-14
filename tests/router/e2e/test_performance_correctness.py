@@ -27,7 +27,7 @@ class TestPerformanceCorrectness:
     """Category E: Performance and correctness verification"""
 
     @pytest.mark.e2e
-    def test_cache_hit_performance(
+    async def test_cache_hit_performance(
         self, router_with_cache, tokenizer, sampling_params_deterministic
     ):
         """
@@ -49,103 +49,107 @@ class TestPerformanceCorrectness:
         print("Test E1: Cache hit performance improvement")
         print("=" * 60)
 
-        from fastapi.testclient import TestClient
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            # Use consistent prompt for cache behavior
+            prompt = "Explain machine learning in simple terms"
 
-        # Use consistent prompt for cache behavior
-        prompt = "Explain machine learning in simple terms"
+            request_data = {
+                "model": "qwen3-thinking",
+                "messages": [{"role": "user", "content": prompt}],
+                **sampling_params_deterministic,
+            }
 
-        request_data = {
-            "model": "qwen3-thinking",
-            "messages": [{"role": "user", "content": prompt}],
-            **sampling_params_deterministic,
-        }
+            print(f"\nPrompt: '{prompt}'")
+            print(f"Temperature: {sampling_params_deterministic['temperature']}")
 
-        print(f"\nPrompt: '{prompt}'")
-        print(f"Temperature: {sampling_params_deterministic['temperature']}")
+            # Warmup: Ensure any initial overhead is accounted for
+            print("\n--- Warmup Request ---")
+            warmup_response = await client.post("/v1/chat/completions", json=request_data)
+            assert warmup_response.status_code == 200
+            print("Warmup complete")
 
-        # Warmup: Ensure any initial overhead is accounted for
-        print("\n--- Warmup Request ---")
-        warmup_response = client.post("/v1/chat/completions", json=request_data)
-        assert warmup_response.status_code == 200
-        print("Warmup complete")
-
-        # First request: Cache miss (fresh prompt)
-        print("\n--- Request 1: Cache Miss ---")
-        start_time = time.time()
-        response1 = client.post("/v1/chat/completions", json=request_data)
-        time1 = time.time() - start_time
-
-        print(f"Time: {time1:.4f}s")
-        assert response1.status_code == 200
-
-        data1 = response1.json()
-        content1 = data1["choices"][0]["message"]["content"]
-        tokens1 = data1["usage"]["completion_tokens"]
-        print(f"Generated {tokens1} tokens")
-        print(f"Content: '{content1[:60]}...'")
-
-        # Collect cache hit times
-        cache_hit_times = []
-        num_cache_hits = 5
-
-        print(f"\n--- Cache Hit Requests (x{num_cache_hits}) ---")
-        for i in range(num_cache_hits):
+            # First request: Cache miss (fresh prompt)
+            print("\n--- Request 1: Cache Miss ---")
             start_time = time.time()
-            response = client.post("/v1/chat/completions", json=request_data)
-            elapsed = time.time() - start_time
+            response1 = await client.post("/v1/chat/completions", json=request_data)
+            time1 = time.time() - start_time
 
-            assert response.status_code == 200
-            cache_hit_times.append(elapsed)
-            print(f"  Request {i+1}: {elapsed:.4f}s")
+            print(f"Time: {time1:.4f}s")
+            assert response1.status_code == 200
 
-        # Analysis
-        print(f"\n--- Performance Analysis ---")
-        avg_cache_hit_time = sum(cache_hit_times) / len(cache_hit_times)
-        min_cache_hit_time = min(cache_hit_times)
-        max_cache_hit_time = max(cache_hit_times)
+            data1 = response1.json()
+            content1 = data1["choices"][0]["message"]["content"]
+            tokens1 = data1["usage"]["completion_tokens"]
+            print(f"Generated {tokens1} tokens")
+            print(f"Content: '{content1[:60]}...'")
 
-        print(f"Cache miss time:       {time1:.4f}s")
-        print(f"Cache hit avg:         {avg_cache_hit_time:.4f}s")
-        print(f"Cache hit range:       {min_cache_hit_time:.4f}s - {max_cache_hit_time:.4f}s")
+            # Collect cache hit times
+            cache_hit_times = []
+            num_cache_hits = 5
 
-        speedup_avg = time1 / avg_cache_hit_time if avg_cache_hit_time > 0 else 1.0
-        speedup_best = time1 / min_cache_hit_time if min_cache_hit_time > 0 else 1.0
+            print(f"\n--- Cache Hit Requests (x{num_cache_hits}) ---")
+            for i in range(num_cache_hits):
+                start_time = time.time()
+                response = await client.post("/v1/chat/completions", json=request_data)
+                elapsed = time.time() - start_time
 
-        print(f"\nSpeedup (avg):  {speedup_avg:.2f}x")
-        print(f"Speedup (best): {speedup_best:.2f}x")
+                assert response.status_code == 200
+                cache_hit_times.append(elapsed)
+                print(f"  Request {i+1}: {elapsed:.4f}s")
 
-        # Verification
-        print(f"\n--- Verification ---")
+            # Analysis
+            print(f"\n--- Performance Analysis ---")
+            avg_cache_hit_time = sum(cache_hit_times) / len(cache_hit_times)
+            min_cache_hit_time = min(cache_hit_times)
+            max_cache_hit_time = max(cache_hit_times)
 
-        # Expect at least 10% speedup on average
-        if speedup_avg > 1.1:
-            print(f"✓ Significant speedup achieved: {speedup_avg:.2f}x (>10%)")
-        elif speedup_avg > 1.0:
-            print(f"⚠ Modest speedup: {speedup_avg:.2f}x (<10%)")
-            print(f"  Note: Speedup may be limited by generation time")
-        else:
-            print(f"⚠ No speedup detected: {speedup_avg:.2f}x")
-            print(f"  This may be expected if generation dominates latency")
+            print(f"Cache miss time:       {time1:.4f}s")
+            print(f"Cache hit avg:         {avg_cache_hit_time:.4f}s")
+            print(f"Cache hit range:       {min_cache_hit_time:.4f}s - {max_cache_hit_time:.4f}s")
 
-        # Cache hits should be relatively consistent
-        cache_hit_variance = max_cache_hit_time - min_cache_hit_time
-        print(f"✓ Cache hit variance: {cache_hit_variance:.4f}s")
+            speedup_avg = time1 / avg_cache_hit_time if avg_cache_hit_time > 0 else 1.0
+            speedup_best = time1 / min_cache_hit_time if min_cache_hit_time > 0 else 1.0
 
-        if cache_hit_variance < 0.1:
-            print(f"  → Consistent performance across cache hits")
+            print(f"\nSpeedup (avg):  {speedup_avg:.2f}x")
+            print(f"Speedup (best): {speedup_best:.2f}x")
 
-        # Content should remain deterministic
-        data_last = response.json()
-        content_last = data_last["choices"][0]["message"]["content"]
-        assert content1 == content_last, "Content changed despite deterministic mode"
-        print(f"✓ Content remains consistent (deterministic)")
+            # Verification
+            print(f"\n--- Verification ---")
 
-        print("\n✅ Test E1 PASSED: Cache performance characteristics verified")
+            # Expect at least 10% speedup on average
+            if speedup_avg > 1.1:
+                print(f"✓ Significant speedup achieved: {speedup_avg:.2f}x (>10%)")
+            elif speedup_avg > 1.0:
+                print(f"⚠ Modest speedup: {speedup_avg:.2f}x (<10%)")
+                print(f"  Note: Speedup may be limited by generation time")
+            else:
+                print(f"⚠ No speedup detected: {speedup_avg:.2f}x")
+                print(f"  This may be expected if generation dominates latency")
+
+            # Cache hits should be relatively consistent
+            cache_hit_variance = max_cache_hit_time - min_cache_hit_time
+            print(f"✓ Cache hit variance: {cache_hit_variance:.4f}s")
+
+            if cache_hit_variance < 0.1:
+                print(f"  → Consistent performance across cache hits")
+
+            # Content should remain deterministic
+            data_last = response.json()
+            content_last = data_last["choices"][0]["message"]["content"]
+            assert content1 == content_last, "Content changed despite deterministic mode"
+            print(f"✓ Content remains consistent (deterministic)")
+
+            print("\n✅ Test E1 PASSED: Cache performance characteristics verified")
 
     @pytest.mark.e2e
-    def test_cache_size_and_eviction(
+    async def test_cache_size_and_eviction(
         self, router_with_cache, tokenizer, sampling_params_deterministic
     ):
         """
@@ -169,106 +173,110 @@ class TestPerformanceCorrectness:
         print("Test E2: Cache size and eviction")
         print("=" * 60)
 
-        from fastapi.testclient import TestClient
+        # Use async client to avoid event loop issues with httpx connection pooling
+        import httpx
+        from httpx import ASGITransport
 
-        client = TestClient(router_with_cache.app, raise_server_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=router_with_cache.app),
+            base_url="http://test"
+        ) as client:
+            # Check cache size limit
+            cache_limit = router_with_cache.args.radix_tree_max_size
+            print(f"\nCache size limit: {cache_limit} tokens")
 
-        # Check cache size limit
-        cache_limit = router_with_cache.args.radix_tree_max_size
-        print(f"\nCache size limit: {cache_limit} tokens")
+            # Generate diverse prompts to fill cache
+            base_prompts = [
+                "Explain quantum physics",
+                "Describe machine learning",
+                "What is computer science",
+                "Define artificial intelligence",
+                "Explain neural networks",
+                "What are algorithms",
+                "Describe data structures",
+                "Explain programming languages",
+                "What is software engineering",
+                "Define operating systems",
+            ]
 
-        # Generate diverse prompts to fill cache
-        base_prompts = [
-            "Explain quantum physics",
-            "Describe machine learning",
-            "What is computer science",
-            "Define artificial intelligence",
-            "Explain neural networks",
-            "What are algorithms",
-            "Describe data structures",
-            "Explain programming languages",
-            "What is software engineering",
-            "Define operating systems",
-        ]
+            # Extend with variations
+            prompts = base_prompts.copy()
+            for i in range(10):
+                prompts.append(f"Tell me about topic number {i}")
 
-        # Extend with variations
-        prompts = base_prompts.copy()
-        for i in range(10):
-            prompts.append(f"Tell me about topic number {i}")
+            print(f"Generated {len(prompts)} unique prompts")
 
-        print(f"Generated {len(prompts)} unique prompts")
+            # Insert prompts into cache
+            print("\n--- Filling Cache ---")
+            successful_requests = 0
 
-        # Insert prompts into cache
-        print("\n--- Filling Cache ---")
-        successful_requests = 0
+            for i, prompt in enumerate(prompts):
+                request_data = {
+                    "model": "qwen3-thinking",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 20,  # Keep short to fill cache faster
+                    "temperature": 0.0,
+                }
 
-        for i, prompt in enumerate(prompts):
+                try:
+                    response = await client.post("/v1/chat/completions", json=request_data)
+                    if response.status_code == 200:
+                        successful_requests += 1
+                        if (i + 1) % 5 == 0:
+                            print(f"  Processed {i+1}/{len(prompts)} prompts...")
+                    else:
+                        print(f"  Request {i+1} failed: {response.status_code}")
+                except Exception as e:
+                    print(f"  Request {i+1} error: {e}")
+
+            print(f"\nSuccessful requests: {successful_requests}/{len(prompts)}")
+
+            # Verification: Cache still functional
+            print("\n--- Verify Cache Still Functional ---")
+
+            # Try a new prompt
+            new_prompt = "This is a brand new prompt to test post-eviction"
             request_data = {
                 "model": "qwen3-thinking",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 20,  # Keep short to fill cache faster
-                "temperature": 0.0,
+                "messages": [{"role": "user", "content": new_prompt}],
+                **sampling_params_deterministic,
             }
 
-            try:
-                response = client.post("/v1/chat/completions", json=request_data)
-                if response.status_code == 200:
-                    successful_requests += 1
-                    if (i + 1) % 5 == 0:
-                        print(f"  Processed {i+1}/{len(prompts)} prompts...")
-                else:
-                    print(f"  Request {i+1} failed: {response.status_code}")
-            except Exception as e:
-                print(f"  Request {i+1} error: {e}")
+            response = await client.post("/v1/chat/completions", json=request_data)
+            print(f"Status: {response.status_code}")
+            assert response.status_code == 200, "Cache broken after eviction"
 
-        print(f"\nSuccessful requests: {successful_requests}/{len(prompts)}")
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            print(f"Generated: '{content[:60]}...'")
+            print(f"✓ Cache functional after filling")
 
-        # Verification: Cache still functional
-        print("\n--- Verify Cache Still Functional ---")
+            # Try cache hit on new prompt
+            response2 = await client.post("/v1/chat/completions", json=request_data)
+            assert response2.status_code == 200, "Cache hit failed after eviction"
+            print(f"✓ Cache hit works after eviction")
 
-        # Try a new prompt
-        new_prompt = "This is a brand new prompt to test post-eviction"
-        request_data = {
-            "model": "qwen3-thinking",
-            "messages": [{"role": "user", "content": new_prompt}],
-            **sampling_params_deterministic,
-        }
+            # Try one of the early prompts (may have been evicted)
+            print("\n--- Check Early Prompt (May Be Evicted) ---")
+            early_request = {
+                "model": "qwen3-thinking",
+                "messages": [{"role": "user", "content": base_prompts[0]}],
+                **sampling_params_deterministic,
+            }
 
-        response = client.post("/v1/chat/completions", json=request_data)
-        print(f"Status: {response.status_code}")
-        assert response.status_code == 200, "Cache broken after eviction"
+            response_early = await client.post("/v1/chat/completions", json=early_request)
+            print(f"Status: {response_early.status_code}")
+            assert response_early.status_code == 200, "Early prompt request failed"
+            print(f"✓ Early prompt still processable (re-cached if evicted)")
 
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        print(f"Generated: '{content[:60]}...'")
-        print(f"✓ Cache functional after filling")
+            print("\n--- Verification ---")
+            print(f"✓ Cache accepted {successful_requests} prompts")
+            print(f"✓ Cache remains functional after filling")
+            print(f"✓ New entries can be added")
+            print(f"✓ Cache hits continue to work")
+            print(f"✓ System stable (no crashes)")
 
-        # Try cache hit on new prompt
-        response2 = client.post("/v1/chat/completions", json=request_data)
-        assert response2.status_code == 200, "Cache hit failed after eviction"
-        print(f"✓ Cache hit works after eviction")
-
-        # Try one of the early prompts (may have been evicted)
-        print("\n--- Check Early Prompt (May Be Evicted) ---")
-        early_request = {
-            "model": "qwen3-thinking",
-            "messages": [{"role": "user", "content": base_prompts[0]}],
-            **sampling_params_deterministic,
-        }
-
-        response_early = client.post("/v1/chat/completions", json=early_request)
-        print(f"Status: {response_early.status_code}")
-        assert response_early.status_code == 200, "Early prompt request failed"
-        print(f"✓ Early prompt still processable (re-cached if evicted)")
-
-        print("\n--- Verification ---")
-        print(f"✓ Cache accepted {successful_requests} prompts")
-        print(f"✓ Cache remains functional after filling")
-        print(f"✓ New entries can be added")
-        print(f"✓ Cache hits continue to work")
-        print(f"✓ System stable (no crashes)")
-
-        print("\n✅ Test E2 PASSED: Cache size and eviction verified")
+            print("\n✅ Test E2 PASSED: Cache size and eviction verified")
 
     @pytest.mark.e2e
     @pytest.mark.asyncio
