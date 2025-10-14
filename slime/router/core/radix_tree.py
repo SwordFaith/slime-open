@@ -362,6 +362,13 @@ class StringRadixTrie:
                     print("[RadixTree] Insertion failed: text or token_ids is empty")
                 return False
 
+            # Validate weight_version: only -1 (default) or non-negative values allowed
+            if weight_version is not None and weight_version < -1:
+                if self.verbose:
+                    print(f"[WARNING] Invalid weight_version {weight_version}: "
+                          f"only -1 (default for non-AI tokens) or non-negative values are allowed")
+                return False
+
             # Use provided weight version
             current_weight_version = weight_version
 
@@ -470,6 +477,13 @@ class StringRadixTrie:
         if not text or not token_ids:
             if self.verbose:
                 print("[RadixTree] Insertion failed: text or token_ids is empty")
+            return False
+
+        # Validate weight_version: only -1 (default) or non-negative values allowed
+        if weight_version is not None and weight_version < -1:
+            if self.verbose:
+                print(f"[WARNING] Invalid weight_version {weight_version}: "
+                      f"only -1 (default for non-AI tokens) or non-negative values are allowed")
             return False
 
         # Use provided weight version
@@ -610,8 +624,15 @@ class StringRadixTrie:
                         node.weight_version = weight_version    # Generation version (never modified)
                         node.traverse_version = weight_version  # Initial traverse version
                     # Existing traversed node: only update traverse version
+                    # IMPORTANT: traverse_version must maintain invariant weight_version <= traverse_version
+                    # It should track the maximum weight_version that traversed this node (monotonic increase)
                     else:
-                        node.traverse_version = weight_version  # Update traverse version for GC control
+                        if node.traverse_version is None:
+                            # If traverse_version was somehow None, initialize it properly
+                            node.traverse_version = max(weight_version, node.weight_version)
+                        else:
+                            # Update to maximum to ensure monotonic increase
+                            node.traverse_version = max(node.traverse_version, weight_version)
 
         return True
 
