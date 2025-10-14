@@ -96,14 +96,16 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
                 "Please specify the HuggingFace model checkpoint for tokenizer."
             )
 
+        # Determine verbose mode upfront
+        verbose = getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False)
+        max_cache_size = getattr(self.args, 'radix_tree_max_size', 10000)
+
         # Check if components are already registered to avoid duplicate initialization
         if self.component_registry.has("tokenizer") and self.component_registry.has("radix_tree"):
             # Use existing components
             self.tokenizer = self.component_registry.get("tokenizer")
             self.radix_tree = self.component_registry.get("radix_tree")
-            if getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False):
-                print(f"[slime-router] RadixTreeMiddleware using existing components:")
-                print(f"  - Component registry: existing")
+            component_status = "using existing"
         else:
             # Initialize components only if not already registered
             try:
@@ -117,33 +119,57 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
                 )
 
             # Create radix tree with unified verbose configuration
-            router_verbose = getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False)
             self.radix_tree = StringRadixTrie(
-                max_cache_size=getattr(self.args, 'radix_tree_max_size', 10000),
+                max_cache_size=max_cache_size,
                 tokenizer=self.tokenizer,
-                verbose=router_verbose
+                verbose=verbose
             )
 
             # Thread-safe component registration
             self.component_registry.register("tokenizer", self.tokenizer)
             self.component_registry.register("radix_tree", self.radix_tree)
-
-            if getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False):
-                print(f"[slime-router] RadixTreeMiddleware initialized new components:")
-                print(f"  - Tokenizer: {self.args.hf_checkpoint}")
-                print(f"  - Max cache size: {getattr(self.args, 'radix_tree_max_size', 10000)}")
-                print(f"  - Verbose: {router_verbose}")
-                print(f"  - Component registry: created")
+            component_status = "initialized new"
 
         # Maintain backward compatibility
         self.router.radix_tree = self.radix_tree
 
-        if getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False):
-            print(f"[slime-router] RadixTreeMiddleware initialized:")
+        # Consolidated logging
+        if verbose:
+            print(f"[slime-router] RadixTreeMiddleware {component_status} components:")
             print(f"  - Tokenizer: {self.args.hf_checkpoint}")
-            print(f"  - Max cache size: {getattr(self.args, 'radix_tree_max_size', 10000)}")
-            print(f"  - Verbose: {getattr(self.router, 'verbose', False) or getattr(self.args, 'verbose', False)}")
+            print(f"  - Max cache size: {max_cache_size}")
+            print(f"  - Verbose: {verbose}")
             print(f"  - Component registry: {'provided' if component_registry is not None else 'created'}")
+
+    def _handle_cache_query_error(self, error: Exception, context: str) -> tuple:
+        """
+        Handle errors during cache query operations with consistent error handling.
+
+        Args:
+            error: Exception that occurred
+            context: Context string for logging (e.g., "text", "messages template")
+
+        Returns:
+            Empty tuple: ([], [], [], [])
+        """
+        # Phase 2 TODO: Implement structured error handling with security validation
+        # Should implement:
+        # - Input validation and sanitization
+        # - Error categorization (validation vs system errors)
+        # - Security audit logging for suspicious inputs
+        # - Rate limiting for repeated validation failures
+        # - Data integrity validation
+        # - Automatic recovery mechanisms
+        # - Circuit breaker pattern for cascade failures
+        # - Detailed error logging with context
+        # - Health check integration
+        # - Graceful degradation strategies
+
+        error_type = type(error).__name__
+        if getattr(self.router, "verbose", False):
+            print(f"[slime-router] Warning: {context} cache query {error_type}: {error}")
+
+        return ([], [], [], [])
 
     def _parse_response(self, response: Response) -> dict | None:
         """
@@ -181,41 +207,8 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
         """
         try:
             return await self.radix_tree.get_or_create_tokenization_async(input_text)
-        except ValueError as e:
-            # Phase 2 TODO: Implement structured error handling with security validation
-            # Specific exception from radix_tree.py:618 - empty tokenizer or text
-            # Should implement:
-            # - Input validation and sanitization
-            # - Error categorization (validation vs system errors)
-            # - Security audit logging for suspicious inputs
-            # - Rate limiting for repeated validation failures
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Text cache query validation error: {e}")
-            return ([], [], [], [])
-        except (AttributeError, KeyError) as e:
-            # Phase 2 TODO: Implement secure exception handling for data structure errors
-            # Data structure access errors could indicate:
-            # - Corruption attacks
-            # - Memory issues
-            # - Race conditions
-            # Should implement:
-            # - Data integrity validation
-            # - Automatic recovery mechanisms
-            # - Security incident logging
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Text cache query data error: {e}")
-            return ([], [], [], [])
         except Exception as e:
-            # Phase 2 TODO: Implement comprehensive exception handling and monitoring
-            # Catch-all for unexpected errors - should implement:
-            # - Error classification and prioritization
-            # - Circuit breaker pattern for cascade failures
-            # - Detailed error logging with context
-            # - Health check integration
-            # - Graceful degradation strategies
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Unexpected text cache query error: {e}")
-            return ([], [], [], [])
+            return self._handle_cache_query_error(e, "text")
 
     async def query_cache_by_messages_template(
         self,
@@ -260,9 +253,7 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
             return await self.radix_tree.get_or_create_tokenization_async(text)
 
         except Exception as e:
-            if getattr(self.router, "verbose", False):
-                print(f"[slime-router] Warning: Messages template cache query error: {e}")
-            return ([], [], [], [])
+            return self._handle_cache_query_error(e, "messages template")
 
     async def _generate_with_retry(
         self, request: Request, call_next
@@ -382,10 +373,13 @@ class RadixTreeMiddleware(BaseHTTPMiddleware):
             if isinstance(input_ids, list) and len(input_ids) > 0:
                 # Check if this is batch format (list of lists) or single sequence (flat list)
                 if isinstance(input_ids[0], list):
-                    # Batch format: take first sequence only (middleware currently only supports single sequence caching)
-                    input_text = self.tokenizer.decode(input_ids[0])
+                    # Batch format: middleware currently doesn't support batch caching
+                    # Bypass cache for batch requests to maintain compatibility
+                    if getattr(self.router, "verbose", False):
+                        print(f"[slime-router] Batch request detected ({len(input_ids)} sequences), bypassing cache")
+                    return await call_next(request)
                 else:
-                    # Single sequence format
+                    # Single sequence format (flat list)
                     input_text = self.tokenizer.decode(input_ids)
             else:
                 input_text = None

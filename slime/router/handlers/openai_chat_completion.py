@@ -60,49 +60,8 @@ class ChatCompletionHandler:
         """
         self.router = router
         self.args = router.args
-        self._cache_available = None  # Cache the availability check result
         self._reasoning_parser = None  # Lazy-initialized reasoning parser
         self._function_call_parser = None  # Lazy-initialized function call parser
-
-    async def _check_cache_availability(self):
-        """
-        Test if cache support is available by checking router's component registry.
-
-        Returns:
-            bool: True if cache is available, False otherwise
-        """
-        if self._cache_available is not None:
-            return self._cache_available
-
-        try:
-            # Check if router has the required components
-            if (hasattr(self.router, 'component_registry') and
-                self.router.component_registry.has("radix_tree") and
-                self.router.component_registry.has("tokenizer")):
-
-                # Cache is available if both components exist
-                self._cache_available = True
-
-                if getattr(self.args, 'verbose', False):
-                    print(f"[slime-router] Cache available through component registry")
-
-                return self._cache_available
-
-            else:
-                # Cache not available
-                self._cache_available = False
-
-                if getattr(self.args, 'verbose', False):
-                    print(f"[slime-router] Cache not available: missing components")
-
-                return self._cache_available
-
-        except Exception as e:
-            # Any error means cache is not available
-            if getattr(self.args, 'verbose', False):
-                print(f"[slime-router] Cache availability check error: {e}")
-            self._cache_available = False
-            return False
 
     async def handle_request(self, request: Request):
         """
@@ -128,8 +87,8 @@ class ChatCompletionHandler:
 
             stream = request_data.get("stream", False)
 
-            # Check if cache support is available
-            cache_available = await self._check_cache_availability()
+            # Check if cache support is available (use router's method)
+            cache_available = self.router._check_cache_availability()
 
             if not cache_available:
                 # Direct mode: Proxy to SGLang Chat Completion API
@@ -192,6 +151,55 @@ class ChatCompletionHandler:
                     status_code=400,
                     detail=f"Invalid request: message at index {i} must have 'role' and 'content' fields"
                 )
+
+    def _fix_reasoning_content_in_response(self, content: bytes) -> bytes:
+        """
+        Fix SGLang reasoning parser output: move reasoning_content to content field.
+
+        When reasoning parser is enabled, SGLang may put content in reasoning_content
+        field instead of content. This ensures OpenAI compatibility by moving it back.
+
+        Args:
+            content: Response content bytes from SGLang
+
+        Returns:
+            Fixed response content bytes
+        """
+        try:
+            response_json = json.loads(content) if content else {}
+
+            if getattr(self.args, 'verbose', False):
+                print(f"[slime-router] SGLang response has choices: {'choices' in response_json}")
+
+            # Check if reasoning parser put content in reasoning_content
+            if (isinstance(response_json, dict) and
+                'choices' in response_json and
+                len(response_json['choices']) > 0):
+
+                for choice in response_json['choices']:
+                    if 'message' in choice and isinstance(choice['message'], dict):
+                        message = choice['message']
+
+                        # If content is None but reasoning_content exists, merge them
+                        if message.get('content') is None and 'reasoning_content' in message:
+                            reasoning_content = message.get('reasoning_content', '')
+
+                            if getattr(self.args, 'verbose', False):
+                                print(f"[slime-router] Fixing content=None: using reasoning_content ({len(reasoning_content)} chars)")
+
+                            # Put reasoning content into content field for OpenAI compatibility
+                            message['content'] = reasoning_content
+
+                # Re-serialize the modified response
+                return json.dumps(response_json).encode('utf-8')
+
+            return content
+
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            # If parsing fails, just pass through the original response
+            if getattr(self.args, 'verbose', False):
+                print(f"[slime-router] Warning: Failed to process reasoning content: {e}")
+            return content
 
     def _parse_generated_output(
         self,
@@ -324,42 +332,8 @@ class ChatCompletionHandler:
                 response = await self.router.client.request("POST", sglang_url, content=body, headers=headers)
                 content = await response.aread()
 
-                # Handle reasoning parser output: if content is None but reasoning_content exists, use it
-                try:
-                    response_json = json.loads(content) if content else {}
-
-                    if getattr(self.args, 'verbose', False):
-                        print(f"[slime-router] SGLang response status: {response.status_code}")
-
-                    # Check if reasoning parser put content in reasoning_content
-                    if (isinstance(response_json, dict) and
-                        'choices' in response_json and
-                        len(response_json['choices']) > 0):
-
-                        for choice in response_json['choices']:
-                            if 'message' in choice and isinstance(choice['message'], dict):
-                                message = choice['message']
-
-                                # If content is None but reasoning_content exists, merge them
-                                if message.get('content') is None and 'reasoning_content' in message:
-                                    reasoning_content = message.get('reasoning_content', '')
-
-                                    if getattr(self.args, 'verbose', False):
-                                        print(f"[slime-router] Fixing content=None: using reasoning_content ({len(reasoning_content)} chars)")
-
-                                    # Put reasoning content into content field for OpenAI compatibility
-                                    message['content'] = reasoning_content
-
-                                    # Optionally keep reasoning_content for backward compatibility
-                                    # message['reasoning_content'] = reasoning_content  # Keep it
-
-                        # Re-serialize the modified response
-                        content = json.dumps(response_json).encode('utf-8')
-
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    # If parsing fails, just pass through the original response
-                    if getattr(self.args, 'verbose', False):
-                        print(f"[slime-router] Warning: Failed to process reasoning content: {e}")
+                # Fix reasoning content if needed
+                content = self._fix_reasoning_content_in_response(content)
 
                 return Response(
                     content=content,
@@ -415,36 +389,8 @@ class ChatCompletionHandler:
                     if response.status_code >= 400:
                         await self._handle_sglang_error(response, content)
 
-                    # Handle reasoning parser output: if content is None but reasoning_content exists, use it
-                    try:
-                        response_json = json.loads(content) if content else {}
-
-                        # Check if reasoning parser put content in reasoning_content
-                        if (isinstance(response_json, dict) and
-                            'choices' in response_json and
-                            len(response_json['choices']) > 0):
-
-                            for choice in response_json['choices']:
-                                if 'message' in choice and isinstance(choice['message'], dict):
-                                    message = choice['message']
-
-                                    # If content is None but reasoning_content exists, merge them
-                                    if message.get('content') is None and 'reasoning_content' in message:
-                                        reasoning_content = message.get('reasoning_content', '')
-
-                                        if getattr(self.args, 'verbose', False):
-                                            print(f"[slime-router] Fixing content=None (from_data): using reasoning_content ({len(reasoning_content)} chars)")
-
-                                        # Put reasoning content into content field for OpenAI compatibility
-                                        message['content'] = reasoning_content
-
-                            # Re-serialize the modified response
-                            content = json.dumps(response_json).encode('utf-8')
-
-                    except (json.JSONDecodeError, KeyError, TypeError) as e:
-                        # If parsing fails, just pass through the original response
-                        if getattr(self.args, 'verbose', False):
-                            print(f"[slime-router] Warning: Failed to process reasoning content (from_data): {e}")
+                    # Fix reasoning content if needed
+                    content = self._fix_reasoning_content_in_response(content)
 
                     return Response(
                         content=content,

@@ -245,12 +245,10 @@ class SlimeRouter:
             }
         }
 
-        # Get radix tree from component registry (preferred) or fallback to attribute
-        if hasattr(self, 'component_registry') and self.component_registry.has("radix_tree"):
-            radix_tree = self.component_registry.get("radix_tree")
-        elif hasattr(self, 'radix_tree'):
-            radix_tree = self.radix_tree
-        else:
+        # Try to get radix tree from component registry
+        try:
+            radix_tree = self._get_radix_tree()
+        except RuntimeError:
             # No radix tree available, skip cache metrics
             return JSONResponse(content=metrics)
 
@@ -271,12 +269,22 @@ class SlimeRouter:
 
         text = payload.get("text", "")
 
-        # Get radix tree from component registry (preferred) or fallback to attribute
-        if hasattr(self, 'component_registry') and self.component_registry.has("radix_tree"):
-            radix_tree = self.component_registry.get("radix_tree")
-        elif hasattr(self, 'radix_tree'):
-            radix_tree = self.radix_tree
-        else:
+        # Handle empty string early - return empty response
+        if not text:
+            return {
+                "tokens": [],
+                "response": text,
+                "loss_mask": [],
+                "token_length": 0,
+                "loss_mask_length": 0,
+                "rollout_logp": [],
+                "generation_versions": [],
+            }
+
+        # Get radix tree from component registry
+        try:
+            radix_tree = self._get_radix_tree()
+        except RuntimeError:
             raise RuntimeError(
                 "Radix tree not available. Please ensure RadixTreeMiddleware is properly initialized."
             )
@@ -310,22 +318,11 @@ class SlimeRouter:
         tools = payload.get("tools", None)
         add_generation_prompt = payload.get("add_generation_prompt", True)
 
-        # Get radix tree and tokenizer using existing pattern (similar to retrieve_from_text)
-        radix_tree = None
-        tokenizer = None
-
-        # Try component registry first
-        if hasattr(self, 'component_registry') and self.component_registry.has("radix_tree"):
-            radix_tree = self.component_registry.get("radix_tree")
-            if self.component_registry.has("tokenizer"):
-                tokenizer = self.component_registry.get("tokenizer")
-        elif hasattr(self, 'radix_tree'):
-            radix_tree = self.radix_tree
-            # Try to get tokenizer from registry as fallback
-            if hasattr(self, 'component_registry') and self.component_registry.has("tokenizer"):
-                tokenizer = self.component_registry.get("tokenizer")
-
-        if not radix_tree or not tokenizer:
+        # Get radix tree and tokenizer from component registry
+        try:
+            radix_tree = self._get_radix_tree()
+            tokenizer = self._get_tokenizer()
+        except RuntimeError:
             raise RuntimeError(
                 "Radix tree and tokenizer not available. Please ensure RadixTreeMiddleware is properly initialized."
             )
@@ -510,154 +507,6 @@ class SlimeRouter:
     def _get_radix_tree(self):
         """Get radix tree from component registry."""
         return self.get_component_registry().get("radix_tree")
-
-  
-    def _create_generate_handler(self):
-        """Create handler for /generate API calls that uses Radix Cache."""
-        async def generate_handler(request_data: dict):
-            """
-            Internal generate handler that calls router's own /generate endpoint
-            to ensure RadixTreeMiddleware processes the request.
-            """
-            # Check cache availability dynamically
-            cache_available = self._check_cache_availability()
-
-            if not cache_available:
-                # Fallback to direct SGLang worker if cache is not available
-                if self.verbose:
-                    print(f"[slime-router] Cache not available, using direct SGLang worker")
-                worker_url = await self._use_url()
-                try:
-                    response = await self.client.post(
-                        f"{worker_url}/generate",
-                        json=request_data
-                    )
-                    response.raise_for_status()
-                    return response.json()
-                finally:
-                    await self._finish_url(worker_url)
-            else:
-                # Use router's own /generate endpoint to benefit from Radix Cache
-                if self.verbose:
-                    print(f"[slime-router] Using cache-enabled generate endpoint")
-                try:
-                    # Call our own /generate endpoint which will be processed by RadixTreeMiddleware
-                    port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
-                    router_url = f"http://localhost:{port}/generate"
-                    response = await self.client.post(
-                        router_url,
-                        json=request_data
-                    )
-                    response.raise_for_status()
-                    return response.json()
-                except Exception as e:
-                    if self.verbose:
-                        print(f"[slime-router] Warning: Failed to call own /generate endpoint: {e}")
-                        print(f"[slime-router] Falling back to direct SGLang worker")
-
-                    # Fallback to direct worker call
-                    worker_url = await self._use_url()
-                    try:
-                        response = await self.client.post(
-                            f"{worker_url}/generate",
-                            json=request_data
-                        )
-                        response.raise_for_status()
-                        return response.json()
-                    finally:
-                        await self._finish_url(worker_url)
-
-        # Add streaming support
-        async def stream_handler(request_data: dict):
-            """
-            Streaming handler that calls router's own /generate endpoint with streaming.
-            """
-            # Check cache availability dynamically
-            cache_available = self._check_cache_availability()
-
-            if not cache_available:
-                # Direct streaming to SGLang worker
-                if self.verbose:
-                    print(f"[slime-router] Cache not available, using direct SGLang streaming")
-                worker_url = await self._use_url()
-                try:
-                    async with self.client.stream(
-                        "POST",
-                        f"{worker_url}/generate",
-                        json={**request_data, "stream": True},
-                        timeout=httpx.Timeout(None)
-                    ) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if line.strip():
-                                if line.startswith("data: "):
-                                    chunk_data = line[6:]  # Remove "data: " prefix
-                                    if chunk_data == "[DONE]":
-                                        break
-                                    try:
-                                        chunk = json.loads(chunk_data)
-                                        yield chunk
-                                    except json.JSONDecodeError:
-                                        continue
-                finally:
-                    await self._finish_url(worker_url)
-            else:
-                # Use router's own streaming endpoint
-                if self.verbose:
-                    print(f"[slime-router] Using cache-enabled streaming endpoint")
-                try:
-                    # Use compatibility parameters if available, otherwise use main parameters
-                    port = getattr(self.args, 'sglang_router_port', None) or getattr(self.args, 'port', 30000)
-                    router_url = f"http://localhost:{port}/generate"
-                    async with self.client.stream(
-                        "POST",
-                        router_url,
-                        json={**request_data, "stream": True},
-                        timeout=httpx.Timeout(None)
-                    ) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if line.strip():
-                                if line.startswith("data: "):
-                                    chunk_data = line[6:]  # Remove "data: " prefix
-                                    if chunk_data == "[DONE]":
-                                        break
-                                    try:
-                                        chunk = json.loads(chunk_data)
-                                        yield chunk
-                                    except json.JSONDecodeError:
-                                        continue
-                except Exception as e:
-                    if self.verbose:
-                        print(f"[slime-router] Warning: Failed to stream from own endpoint: {e}")
-                        print(f"[slime-router] Falling back to direct SGLang worker")
-
-                    # Fallback to direct worker streaming
-                    worker_url = await self._use_url()
-                    try:
-                        async with self.client.stream(
-                            "POST",
-                            f"{worker_url}/generate",
-                            json={**request_data, "stream": True},
-                            timeout=httpx.Timeout(None)
-                        ) as response:
-                            response.raise_for_status()
-                            async for line in response.aiter_lines():
-                                if line.strip():
-                                    if line.startswith("data: "):
-                                        chunk_data = line[6:]  # Remove "data: " prefix
-                                        if chunk_data == "[DONE]":
-                                            break
-                                        try:
-                                            chunk = json.loads(chunk_data)
-                                            yield chunk
-                                        except json.JSONDecodeError:
-                                            continue
-                    finally:
-                        await self._finish_url(worker_url)
-
-        generate_handler.stream = stream_handler
-        return generate_handler
 
 
 if __name__ == "__main__":
