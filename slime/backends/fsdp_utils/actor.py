@@ -518,8 +518,32 @@ class FSDPTrainRayActor(TrainRayActor):
                 unpacked_batches = unpack_sequences(batches)
                 for unpacked_batch in unpacked_batches:
                     if isinstance(unpacked_batch[metric_key], torch.Tensor):
-                        loss_masks_tensor = unpacked_batch["loss_masks"].to(device=torch.cuda.current_device())
                         metric_tensor = unpacked_batch[metric_key].to(device=torch.cuda.current_device())
+                        loss_masks_tensor = unpacked_batch["loss_masks"].to(device=torch.cuda.current_device())
+
+                        # Safety check: Skip empty tensors (can occur due to CP padding edge cases)
+                        if metric_tensor.numel() == 0:
+                            if loss_masks_tensor.numel() > 0:
+                                # This indicates a potential issue in unpacking logic
+                                logger.debug(
+                                    f"Skipping empty {metric_key} tensor (size {metric_tensor.shape}) "
+                                    f"while loss_masks is non-empty (size {loss_masks_tensor.shape}) "
+                                    f"in batch {_mbs_id}. This can occur with CP padding edge cases."
+                                )
+                            continue
+
+                        # Safety check: Ensure tensor dimensions match
+                        if metric_tensor.shape != loss_masks_tensor.shape:
+                            logger.warning(
+                                f"Dimension mismatch for {metric_key}: "
+                                f"metric_tensor.shape={metric_tensor.shape}, "
+                                f"loss_masks_tensor.shape={loss_masks_tensor.shape}. "
+                                f"Using minimum size to prevent crash."
+                            )
+                            min_size = min(metric_tensor.numel(), loss_masks_tensor.numel())
+                            metric_tensor = metric_tensor.flatten()[:min_size]
+                            loss_masks_tensor = loss_masks_tensor.flatten()[:min_size]
+
                         val += (metric_tensor * loss_masks_tensor).sum() / loss_masks_tensor.sum().clamp_min(1)
                     else:
                         val += unpacked_batch[metric_key]

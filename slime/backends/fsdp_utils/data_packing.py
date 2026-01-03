@@ -171,9 +171,20 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                 elif isinstance(value, torch.Tensor):
                     if key in ["log_probs", "ref_log_probs", "cur_log_probs", "entropy"]:
                         # These are computed from logits[:-1] so they have length seq_len-1
-                        instance[key] = value[
-                            end_idx - 1 - response_lengths[i] - pad_length : end_idx - 1 - pad_length
-                        ]
+                        start_idx_slice = end_idx - 1 - response_lengths[i] - pad_length
+                        end_idx_slice = end_idx - 1 - pad_length
+
+                        # Validate slice bounds to prevent empty tensors
+                        if start_idx_slice >= end_idx_slice or start_idx_slice < 0:
+                            logger.debug(
+                                f"Invalid slice for {key}: start={start_idx_slice}, end={end_idx_slice}, "
+                                f"response_length={response_lengths[i]}, pad_length={pad_length}, "
+                                f"end_idx={end_idx}. Creating empty tensor."
+                            )
+                            # Create explicit empty tensor instead of invalid slice
+                            instance[key] = torch.tensor([], dtype=value.dtype, device=value.device)
+                        else:
+                            instance[key] = value[start_idx_slice:end_idx_slice]
                     elif key == "rollout_log_probs":
                         # rollout_log_probs is packed based on response_lengths, so slice differently
                         instance[key] = value[sum(response_lengths[:i]) : sum(response_lengths[: i + 1])]
